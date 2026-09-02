@@ -2,6 +2,7 @@
 
 #include "settings/streamingpreferences.h"
 #include "backend/computermanager.h"
+#include "streaming/input/plankcursorpresentertarget.h"
 #include "streaming/plankpresentation.h"
 
 #include <SDL3/SDL.h>
@@ -90,7 +91,12 @@ public:
 
     void updatePointerRegionLock();
 
+    std::weak_ptr<PlankCursorPresenterTarget> plank2CursorPresenterTarget()
+        const;
+
 private:
+    friend class PlankCursorPresenterTarget;
+
     enum KeyCombo {
         KeyComboQuit,
         KeyComboUngrabInput,
@@ -151,6 +157,7 @@ private:
         std::uint32_t y = 0;
         std::uint32_t frameWidth = 0;
         std::uint32_t frameHeight = 0;
+        bool clientCoordinates = false;
     };
 
     std::mutex m_RemoteCursorPositionMutex;
@@ -171,6 +178,14 @@ private:
 
     void setCursorVisible(bool visible);
     void activateCompositorCursor();
+    bool isPlank2CursorPresenterAvailable() const;
+    bool applyPlank2CursorImage(const PlankCursorPresenterImage& image);
+    bool applyPlank2CursorPosition(
+        const PlankCursorPresenterPosition& position);
+    void resetPlank2CursorPresenter();
+    bool mapClientCursorPositionToWindow(
+        std::int32_t clientX, std::int32_t clientY,
+        SDL_Window*& window, int& x, int& y) const;
     PlankWaylandCursor* ensureWaylandTabletCursorAttached(
         SDL_Window* targetWindow);
     void reconcileWaylandTabletCursorOutputs();
@@ -195,6 +210,7 @@ private:
     } m_SpecialKeyCombos[KeyComboMax];
 
     std::atomic_uint64_t m_StreamDimensions;
+    std::shared_ptr<PlankCursorPresenterTarget> m_Plank2CursorPresenterTarget;
 
 #ifdef HAVE_LIBINPUT_TABLET
     std::unique_ptr<LinuxWacomInput> m_LinuxWacomInput;

@@ -1,6 +1,26 @@
 QT += core quick network quickcontrols2 svg
 CONFIG += c++17
 
+unix:!macx {
+    PLANK2_ROOT = $$(PLANK2_ROOT)
+    isEmpty(PLANK2_ROOT) {
+        PLANK2_ROOT = $$clean_path($$PWD/../../..)
+    }
+    exists($$PLANK2_ROOT/platform/linux/presentation/src/cursor_presenter_sink_v1.hpp) {
+        message(PLANK2 retained Client cursor presenter selected)
+        INCLUDEPATH += \
+            $$PLANK2_ROOT/core/backend/include \
+            $$PLANK2_ROOT/core/display/include \
+            $$PLANK2_ROOT/core/input/include \
+            $$PLANK2_ROOT/core/session/include \
+            $$PLANK2_ROOT/platform/linux/presentation/include \
+            $$PLANK2_ROOT/platform/linux/presentation/src
+        SOURCES += streaming/input/plank2cursorpresentersink.cpp
+        HEADERS += streaming/input/plank2cursorpresentersink.h
+        DEFINES += PLANK2_RETAINED_CLIENT_ADAPTERS=1
+    }
+}
+
 unix:!macx:contains(CONFIG, plank-transport) {
     isEmpty(PLANK_TRANSPORT_DIR) {
         PLANK_TRANSPORT_DIR = $$(PLANK_TRANSPORT_DIR)
@@ -257,6 +277,7 @@ HEADERS += \
     settings/plankclientpolicy.h \
     streaming/avsynccontroller.h \
     streaming/input/input.h \
+    streaming/input/plankcursorpresentertarget.h \
     streaming/input/plankpointerlogic.h \
     streaming/session.h \
     streaming/plankdisplaymode.h \
@@ -272,6 +293,8 @@ HEADERS += \
     path.h \
     streaming/video/overlaymanager.h \
     backend/systemproperties.h
+
+SOURCES += streaming/input/plankcursorpresentertarget.cpp
 
 contains(DEFINES, HAVE_LIBINPUT_TABLET) {
     SOURCES += streaming/input/linuxwacom.cpp

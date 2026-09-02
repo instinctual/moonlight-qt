@@ -40,7 +40,9 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs,
       m_MouseCursorCapturedVisibilityState(false),
       m_StreamDimensions(
           (static_cast<std::uint64_t>(streamWidth) << 32) |
-          static_cast<std::uint32_t>(streamHeight))
+          static_cast<std::uint32_t>(streamHeight)),
+      m_Plank2CursorPresenterTarget(
+          std::make_shared<PlankCursorPresenterTarget>(this))
 {
     // System keys are always captured when running without a DE
     if (!WMUtils::isRunningDesktopEnvironment()) {
@@ -122,6 +124,8 @@ QSize SdlInputHandler::streamDimensions() const
 
 SdlInputHandler::~SdlInputHandler()
 {
+    m_Plank2CursorPresenterTarget->detach();
+
 #ifdef HAVE_LIBINPUT_TABLET
     m_LinuxWacomInput.reset();
     m_LinuxRawWacomInput.reset();
@@ -145,6 +149,12 @@ SdlInputHandler::~SdlInputHandler()
     // video backends.
     setCursorVisible(false);
 #endif
+}
+
+std::weak_ptr<PlankCursorPresenterTarget>
+SdlInputHandler::plank2CursorPresenterTarget() const
+{
+    return m_Plank2CursorPresenterTarget;
 }
 
 void SdlInputHandler::setWindow(SDL_Window *window)
@@ -349,29 +359,48 @@ void SdlInputHandler::applyPendingRemoteCursor()
         m_RemoteCursorUpdatePending.store(false);
     }
 
+    applyPlank2CursorImage({
+        cursor.generation, cursor.width, cursor.height,
+        cursor.hotspotX, cursor.hotspotY,
+        (cursor.flags & PLANK_CURSOR_FLAG_VISIBLE) != 0,
+        std::move(cursor.pixels),
+    });
+}
+
+bool SdlInputHandler::isPlank2CursorPresenterAvailable() const
+{
+    SDL_assert(SDL_IsMainThread());
+    return m_Window != nullptr && m_LocalCursorSupported &&
+            QGuiApplication::platformName() == "wayland";
+}
+
+bool SdlInputHandler::applyPlank2CursorImage(
+        const PlankCursorPresenterImage& image)
+{
+    SDL_assert(SDL_IsMainThread());
     SDL_Surface* surface = SDL_CreateSurfaceFrom(
-                static_cast<int>(cursor.width),
-                static_cast<int>(cursor.height),
+                static_cast<int>(image.width),
+                static_cast<int>(image.height),
                 SDL_PIXELFORMAT_ARGB8888,
-                cursor.pixels.data(),
-                static_cast<int>(cursor.width * 4U));
+                const_cast<std::uint8_t*>(image.pixels.data()),
+                static_cast<int>(image.width * 4U));
     if (surface == nullptr) {
         SDL_LogWarn(SDL_LOG_CATEGORY_INPUT,
                     "Failed to create PLANK cursor surface: %s",
                     SDL_GetError());
-        return;
+        return false;
     }
 
     SDL_Cursor* replacement = SDL_CreateColorCursor(
                 surface,
-                static_cast<int>(cursor.hotspotX),
-                static_cast<int>(cursor.hotspotY));
+                static_cast<int>(image.hotspotX),
+                static_cast<int>(image.hotspotY));
     SDL_DestroySurface(surface);
     if (replacement == nullptr) {
         SDL_LogWarn(SDL_LOG_CATEGORY_INPUT,
                     "Failed to create PLANK compositor cursor: %s",
                     SDL_GetError());
-        return;
+        return false;
     }
 
     const bool firstCursor = m_RemoteCursor == nullptr;
@@ -381,8 +410,16 @@ void SdlInputHandler::applyPendingRemoteCursor()
     }
     m_RemoteCursor = replacement;
     m_RemoteCursorVisible =
-            (cursor.flags & PLANK_CURSOR_FLAG_VISIBLE) != 0;
-    m_AppliedRemoteCursor = cursor;
+            image.visible;
+    m_AppliedRemoteCursor = {};
+    m_AppliedRemoteCursor.generation = image.generation;
+    m_AppliedRemoteCursor.width = image.width;
+    m_AppliedRemoteCursor.height = image.height;
+    m_AppliedRemoteCursor.hotspotX = image.hotspotX;
+    m_AppliedRemoteCursor.hotspotY = image.hotspotY;
+    m_AppliedRemoteCursor.flags = image.visible ? PLANK_CURSOR_FLAG_VISIBLE : 0;
+    m_AppliedRemoteCursor.pixels.assign(
+                image.pixels.cbegin(), image.pixels.cend());
     m_AppliedRemoteCursorValid = true;
     reconcileWaylandTabletCursorOutputs();
     const QImage cursorImage(
@@ -406,16 +443,80 @@ void SdlInputHandler::applyPendingRemoteCursor()
     if (firstCursor) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "Applied first PLANK local cursor (%ux%u hotspot %u,%u visible=%d)",
-                    cursor.width, cursor.height, cursor.hotspotX, cursor.hotspotY,
+                    image.width, image.height, image.hotspotX, image.hotspotY,
                     m_RemoteCursorVisible ? 1 : 0);
     }
     else {
         SDL_LogDebug(SDL_LOG_CATEGORY_INPUT,
                      "Applied PLANK local cursor generation %llu (%ux%u hotspot %u,%u visible=%d)",
-                     static_cast<unsigned long long>(cursor.generation),
-                     cursor.width, cursor.height, cursor.hotspotX, cursor.hotspotY,
+                     static_cast<unsigned long long>(image.generation),
+                     image.width, image.height, image.hotspotX, image.hotspotY,
                      m_RemoteCursorVisible ? 1 : 0);
     }
+    return true;
+}
+
+bool SdlInputHandler::applyPlank2CursorPosition(
+        const PlankCursorPresenterPosition& position)
+{
+    SDL_assert(SDL_IsMainThread());
+    if (position.owner != PlankCursorPresenterOwner::HostTablet) {
+        activateCompositorCursor();
+        return true;
+    }
+    if (position.clientWidth == 0 || position.clientHeight == 0 ||
+            m_PresentationLayout.canvasSize !=
+                QSize(static_cast<int>(position.clientWidth),
+                      static_cast<int>(position.clientHeight))) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_INPUT,
+                    "PLANK2 cursor presenter rejected a mismatched client canvas");
+        return false;
+    }
+
+    m_AppliedRemoteCursorPosition.sequence = position.sequence;
+    m_AppliedRemoteCursorPosition.x = static_cast<std::uint32_t>(
+                qMax<std::int32_t>(0, position.clientX));
+    m_AppliedRemoteCursorPosition.y = static_cast<std::uint32_t>(
+                qMax<std::int32_t>(0, position.clientY));
+    m_AppliedRemoteCursorPosition.frameWidth = 0;
+    m_AppliedRemoteCursorPosition.frameHeight = 0;
+    m_AppliedRemoteCursorPosition.clientCoordinates = true;
+    m_AppliedRemoteCursorPositionValid = true;
+    m_AppliedRemoteCursorPositionSequence = position.sequence;
+    m_TabletCursorActivationPending.store(false);
+    if (!m_TabletCursorActive) {
+        m_TabletCursorActive = true;
+        m_TabletCursorActivationSequence = position.sequence - 1U;
+        SDL_HideCursor();
+    }
+
+    SDL_Window* targetWindow = nullptr;
+    int x = 0;
+    int y = 0;
+    if (!mapClientCursorPositionToWindow(
+                position.clientX, position.clientY,
+                targetWindow, x, y)) {
+        updateTabletCursorVisibility();
+        return false;
+    }
+    PlankWaylandCursor* cursor =
+            ensureWaylandTabletCursorAttached(targetWindow);
+    if (cursor != nullptr) {
+        cursor->setPosition(x, y);
+        cursor->dispatchPending();
+    }
+    else {
+        return false;
+    }
+    updateTabletCursorVisibility();
+    return true;
+}
+
+void SdlInputHandler::resetPlank2CursorPresenter()
+{
+    SDL_assert(SDL_IsMainThread());
+    resetRemoteCursorPositionEpoch();
+    activateCompositorCursor();
 }
 
 bool SdlInputHandler::handleRemoteCursorPosition(
@@ -810,6 +911,12 @@ bool SdlInputHandler::mapRemoteCursorPositionToWindow(
 {
     if (m_Window == nullptr || position.frameWidth == 0 ||
             position.frameHeight == 0) {
+        if (position.clientCoordinates) {
+            return mapClientCursorPositionToWindow(
+                        static_cast<std::int32_t>(position.x),
+                        static_cast<std::int32_t>(position.y),
+                        window, x, y);
+        }
         return false;
     }
 
@@ -831,6 +938,35 @@ bool SdlInputHandler::mapRemoteCursorPositionToWindow(
             y = qRound(windowPoint.y());
             return true;
         }
+    }
+    return false;
+}
+
+bool SdlInputHandler::mapClientCursorPositionToWindow(
+        std::int32_t clientX, std::int32_t clientY,
+        SDL_Window*& window, int& x, int& y) const
+{
+    if (m_Window == nullptr || clientX < 0 || clientY < 0) {
+        return false;
+    }
+
+    const QPoint clientPoint(clientX, clientY);
+    for (const auto& output : m_PresentationLayout.outputs) {
+        if (!output.canvasRect.contains(clientPoint)) {
+            continue;
+        }
+        int windowWidth = 0;
+        int windowHeight = 0;
+        if (!SDL_GetWindowSize(output.window, &windowWidth, &windowHeight) ||
+                windowWidth <= 0 || windowHeight <= 0) {
+            return false;
+        }
+        window = output.window;
+        x = qRound(static_cast<qreal>(clientX - output.canvasRect.x()) *
+                   windowWidth / output.canvasRect.width());
+        y = qRound(static_cast<qreal>(clientY - output.canvasRect.y()) *
+                   windowHeight / output.canvasRect.height());
+        return true;
     }
     return false;
 }
