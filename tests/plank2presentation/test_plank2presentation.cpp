@@ -166,7 +166,7 @@ namespace {
       sizeof(PlankMediaFrameLeaseV1), PLANK_MEDIA_INTERFACE_VERSION,
       PLANK_MEDIA_FRAME_STAGE_DECODED_V1, request.profile_id,
       request.pixel_layout, request.memory_kind, 3U, 64U, 32U, 17U,
-      UINT64_C(1000000000), "composed-topology-1", 29U, {},
+      UINT64_C(1000000000), "composed-topology-1", 29U, {}, 0U,
     };
     for (std::uint16_t index = 0U; index != frame.plane_count; ++index) {
       frame.planes[index] = {
