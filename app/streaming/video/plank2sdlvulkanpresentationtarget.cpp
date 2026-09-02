@@ -5,6 +5,7 @@
 #include "streaming/video/plank2presentationframe.h"
 #include "plank/display/presentation_v1.h"
 #include "plank/media/interfaces_v1.h"
+#include "plank/media/profile_v1.h"
 
 #include <array>
 #include <cstdint>
