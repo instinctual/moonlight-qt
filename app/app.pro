@@ -7,16 +7,21 @@ unix:!macx {
         PLANK2_ROOT = $$clean_path($$PWD/../../..)
     }
     exists($$PLANK2_ROOT/platform/linux/presentation/src/cursor_presenter_sink_v1.hpp) {
-        message(PLANK2 retained Client cursor presenter selected)
+        message(PLANK2 retained Client adapters selected)
         INCLUDEPATH += \
             $$PLANK2_ROOT/core/backend/include \
             $$PLANK2_ROOT/core/display/include \
             $$PLANK2_ROOT/core/input/include \
+            $$PLANK2_ROOT/core/media/include \
             $$PLANK2_ROOT/core/session/include \
             $$PLANK2_ROOT/platform/linux/presentation/include \
             $$PLANK2_ROOT/platform/linux/presentation/src
-        SOURCES += streaming/input/plank2cursorpresentersink.cpp
-        HEADERS += streaming/input/plank2cursorpresentersink.h
+        SOURCES += \
+            streaming/input/plank2cursorpresentersink.cpp \
+            streaming/video/plank2presentationsource.cpp
+        HEADERS += \
+            streaming/input/plank2cursorpresentersink.h \
+            streaming/video/plank2presentationsource.h
         DEFINES += PLANK2_RETAINED_CLIENT_ADAPTERS=1
     }
 }
