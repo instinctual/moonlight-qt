@@ -337,6 +337,7 @@ ffmpeg {
 ffmpeg:contains(DEFINES, PLANK2_RETAINED_CLIENT_ADAPTERS=1) {
     SOURCES += \
         $$PLANK2_ROOT/core/backend/src/registry_v1.c \
+        $$PLANK2_ROOT/core/display/src/presentation_v1.c \
         $$PLANK2_ROOT/core/display/src/topology_v1.c \
         $$PLANK2_ROOT/core/media/src/capabilities_v1.c \
         $$PLANK2_ROOT/core/media/src/interfaces_v1.c \
