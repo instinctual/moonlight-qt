@@ -6,7 +6,7 @@ unix:!macx {
     isEmpty(PLANK2_ROOT) {
         PLANK2_ROOT = $$clean_path($$PWD/../../..)
     }
-    exists($$PLANK2_ROOT/platform/linux/presentation/src/cursor_presenter_sink_v1.hpp) {
+    exists($$PLANK2_ROOT/platform/linux/presentation/src/cursor_presenter_sink_v1.hpp):exists($$PLANK2_ROOT/platform/linux/media/src/decoder_source_v1.hpp) {
         message(PLANK2 retained Client adapters selected)
         INCLUDEPATH += \
             $$PLANK2_ROOT/core/backend/include \
@@ -14,13 +14,17 @@ unix:!macx {
             $$PLANK2_ROOT/core/input/include \
             $$PLANK2_ROOT/core/media/include \
             $$PLANK2_ROOT/core/session/include \
+            $$PLANK2_ROOT/platform/linux/media/include \
+            $$PLANK2_ROOT/platform/linux/media/src \
             $$PLANK2_ROOT/platform/linux/presentation/include \
             $$PLANK2_ROOT/platform/linux/presentation/src
         SOURCES += \
             streaming/input/plank2cursorpresentersink.cpp \
+            streaming/video/plank2decodersource.cpp \
             streaming/video/plank2presentationsource.cpp
         HEADERS += \
             streaming/input/plank2cursorpresentersink.h \
+            streaming/video/plank2decodersource.h \
             streaming/video/plank2presentationsource.h
         DEFINES += PLANK2_RETAINED_CLIENT_ADAPTERS=1
     }
