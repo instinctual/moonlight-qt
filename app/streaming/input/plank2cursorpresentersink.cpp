@@ -24,7 +24,7 @@ namespace plank::platform::linux_backend {
         public cursor_presenter_stream_t {
     public:
       explicit retained_cursor_presenter_stream_t(
-          std::weak_ptr<PlankCursorPresenterTarget> target,
+          std::weak_ptr<IPlankCursorPresenterTarget> target,
           std::uint32_t client_width, std::uint32_t client_height)
           : target_(std::move(target)),
             client_width_(client_width), client_height_(client_height) {
@@ -70,7 +70,7 @@ namespace plank::platform::linux_backend {
       }
 
     private:
-      std::weak_ptr<PlankCursorPresenterTarget> target_;
+      std::weak_ptr<IPlankCursorPresenterTarget> target_;
       std::uint32_t client_width_;
       std::uint32_t client_height_;
     };
@@ -79,7 +79,7 @@ namespace plank::platform::linux_backend {
         public cursor_presenter_sink_t {
     public:
       explicit retained_cursor_presenter_sink_t(
-          std::weak_ptr<PlankCursorPresenterTarget> target)
+          std::weak_ptr<IPlankCursorPresenterTarget> target)
           : target_(std::move(target)) {
       }
 
@@ -104,13 +104,13 @@ namespace plank::platform::linux_backend {
       }
 
     private:
-      std::weak_ptr<PlankCursorPresenterTarget> target_;
+      std::weak_ptr<IPlankCursorPresenterTarget> target_;
     };
   }
 
   std::shared_ptr<cursor_presenter_sink_t>
   create_retained_sdl_cursor_presenter_sink_v1(
-      std::weak_ptr<PlankCursorPresenterTarget> target) {
+      std::weak_ptr<IPlankCursorPresenterTarget> target) {
     return std::make_shared<retained_cursor_presenter_sink_t>(
       std::move(target));
   }
