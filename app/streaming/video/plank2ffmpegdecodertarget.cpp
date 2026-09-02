@@ -73,8 +73,16 @@ namespace {
 
   bool frame_matches(const AVFrame *frame, const profile_spec_t &spec,
                      std::uint32_t width = 0U, std::uint32_t height = 0U) {
+    // FFmpeg retains AV_PIX_FMT_YUVJ422P as the full-range alias of the
+    // byte-identical 8-bit planar 4:2:2 layout. PLANK carries range as
+    // explicit metadata, so both spellings map to YUV422P8 only when the
+    // decoded frame also proves JPEG/PC range below.
+    const bool pixel_format_matches = frame != nullptr &&
+      (frame->format == spec.pixel_format ||
+       (spec.pixel_format == AV_PIX_FMT_YUV422P &&
+        frame->format == AV_PIX_FMT_YUVJ422P));
     const bool matches = frame != nullptr &&
-      frame->format == spec.pixel_format &&
+      pixel_format_matches &&
       (width == 0U || frame->width == static_cast<int>(width)) &&
       (height == 0U || frame->height == static_cast<int>(height)) &&
       frame->color_range == AVCOL_RANGE_JPEG &&
