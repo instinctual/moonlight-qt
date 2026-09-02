@@ -1408,8 +1408,11 @@ Plank2SdlVulkanPresentResult PlVkRenderer::plank2PresentFrame(
     if (result == FrameSubmissionResult::NoDrawableTarget) {
         return Plank2SdlVulkanPresentResult::NoDrawableTarget;
     }
-    if (result == FrameSubmissionResult::Failed ||
-            !waitForSubmittedFrames(true)) {
+    // Even a failed render/submit may have queued work against the non-owning
+    // AVFrame planes. Always drain the Vulkan presentation boundary before
+    // returning a terminal result and allowing the PLANK lease to be released.
+    const bool completed = waitForSubmittedFrames(true);
+    if (result == FrameSubmissionResult::Failed || !completed) {
         return Plank2SdlVulkanPresentResult::Failed;
     }
     actualPresentTimestampNs = plank2MonotonicTimestampNs();

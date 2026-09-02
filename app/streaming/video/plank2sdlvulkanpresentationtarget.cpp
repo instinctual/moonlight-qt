@@ -7,6 +7,7 @@
 #include "plank/media/interfaces_v1.h"
 #include "plank/media/profile_v1.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <limits>
@@ -111,7 +112,16 @@ namespace {
       }
       total += sizes[index];
     }
-    result.bytes.resize(static_cast<std::size_t>(total), 0x80U);
+    result.bytes.resize(static_cast<std::size_t>(total));
+    if (sample_bytes == 2U) {
+      for (std::size_t index = 0U; index != result.bytes.size(); index += 2U) {
+        // 512 is a valid midpoint sample in a 10-bit little-endian plane.
+        result.bytes[index] = 0U;
+        result.bytes[index + 1U] = 2U;
+      }
+    } else {
+      std::fill(result.bytes.begin(), result.bytes.end(), 0x80U);
+    }
     std::size_t offset = 0U;
     for (std::uint16_t index = 0U; index != 3U; ++index) {
       result.retained.planes[index] = {
@@ -170,6 +180,10 @@ namespace {
       const auto sink = sink_.lock();
       if (!sink || !sink->plank2PresentationAvailable()) {
         return PLANK_BACKEND_OPERATION_UNAVAILABLE_V1;
+      }
+      if (!qualifies(request.profileId, request.pixelLayout,
+                     request.memoryKind)) {
+        return PLANK_BACKEND_OPERATION_UNSUPPORTED_V1;
       }
       opened_ = true;
       profile_id_ = request.profileId;

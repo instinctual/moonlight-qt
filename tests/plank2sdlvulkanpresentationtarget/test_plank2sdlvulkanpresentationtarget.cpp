@@ -175,6 +175,8 @@ int main()
     auto request = open_request(configured);
     require(target->open(request) == PLANK_BACKEND_OPERATION_OK_V1,
             "exact target did not open");
+    require(sink->test_calls == tuples.size() + 1U,
+            "open did not repeat exact real-frame qualification");
     require(target->open(request) == PLANK_BACKEND_OPERATION_INVALID_ARGUMENT_V1,
             "already-open target reopened");
 
