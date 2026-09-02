@@ -335,8 +335,17 @@ ffmpeg {
         streaming/video/ffmpeg-renderers/pacer/pacer.h
 }
 ffmpeg:contains(DEFINES, PLANK2_RETAINED_CLIENT_ADAPTERS=1) {
-    SOURCES += streaming/video/plank2ffmpegdecodertarget.cpp
-    HEADERS += streaming/video/plank2ffmpegdecodertarget.h
+    SOURCES += \
+        $$PLANK2_ROOT/core/backend/src/registry_v1.c \
+        $$PLANK2_ROOT/core/display/src/topology_v1.c \
+        $$PLANK2_ROOT/core/media/src/capabilities_v1.c \
+        $$PLANK2_ROOT/core/media/src/interfaces_v1.c \
+        $$PLANK2_ROOT/core/media/src/profile_v1.c \
+        streaming/video/plank2ffmpegdecodertarget.cpp \
+        streaming/video/plank2presentationframe.cpp
+    HEADERS += \
+        streaming/video/plank2ffmpegdecodertarget.h \
+        streaming/video/plank2presentationframe.h
 }
 libva {
     message(VAAPI renderer selected)
