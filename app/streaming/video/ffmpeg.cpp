@@ -1,5 +1,6 @@
 #include <Limelight.h>
 #include "ffmpeg.h"
+#include "ffmpegtestframes.h"
 #include "streaming/session.h"
 
 #include <h264_stream.h>
@@ -50,9 +51,6 @@ extern "C" {
 #ifdef HAVE_LIBPLACEBO_VULKAN
 #include "ffmpeg-renderers/plvk.h"
 #endif
-
-// This is gross but it allows us to use sizeof()
-#include "ffmpeg_videosamples.cpp"
 
 #define MAX_DECODER_PASS 2
 
@@ -602,70 +600,56 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
     // now to see if things will actually work when the video stream
     // comes in.
     if (testFrame) {
+        PlankFfmpegTestFrameKind testFrameKind;
         switch (params->videoFormat) {
         case VIDEO_FORMAT_H264:
-            m_Pkt->data = (uint8_t*)k_H264TestFrame;
-            m_Pkt->size = sizeof(k_H264TestFrame);
+            testFrameKind = PlankFfmpegTestFrameKind::H264;
             break;
         case VIDEO_FORMAT_H264_HIGH8_422:
-            m_Pkt->data = (uint8_t*)k_H264High8_422TestFrame;
-            m_Pkt->size = sizeof(k_H264High8_422TestFrame);
+            testFrameKind = PlankFfmpegTestFrameKind::H264High8_422;
             break;
         case VIDEO_FORMAT_H264_HIGH10_422:
-            m_Pkt->data = (uint8_t*)k_H264High10_422TestFrame;
-            m_Pkt->size = sizeof(k_H264High10_422TestFrame);
+            testFrameKind = PlankFfmpegTestFrameKind::H264High10_422;
             break;
         case VIDEO_FORMAT_H265:
-            m_Pkt->data = (uint8_t*)k_HEVCMainTestFrame;
-            m_Pkt->size = sizeof(k_HEVCMainTestFrame);
+            testFrameKind = PlankFfmpegTestFrameKind::HevcMain;
             break;
         case VIDEO_FORMAT_H265_MAIN10:
-            m_Pkt->data = (uint8_t*)k_HEVCMain10TestFrame;
-            m_Pkt->size = sizeof(k_HEVCMain10TestFrame);
+            testFrameKind = PlankFfmpegTestFrameKind::HevcMain10;
             break;
         case VIDEO_FORMAT_AV1_MAIN8:
-            m_Pkt->data = (uint8_t*)k_AV1Main8TestFrame;
-            m_Pkt->size = sizeof(k_AV1Main8TestFrame);
+            testFrameKind = PlankFfmpegTestFrameKind::Av1Main8;
             break;
         case VIDEO_FORMAT_AV1_MAIN10:
-            m_Pkt->data = (uint8_t*)k_AV1Main10TestFrame;
-            m_Pkt->size = sizeof(k_AV1Main10TestFrame);
+            testFrameKind = PlankFfmpegTestFrameKind::Av1Main10;
             break;
         case VIDEO_FORMAT_H264_HIGH8_444:
-            m_Pkt->data = (uint8_t*)k_h264High_444TestFrame;
-            m_Pkt->size = sizeof(k_h264High_444TestFrame);
+            testFrameKind = PlankFfmpegTestFrameKind::H264High8_444;
             break;
         case VIDEO_FORMAT_H264_HIGH10_444:
-            m_Pkt->data = (uint8_t*)k_h264High10_444TestFrame;
-            m_Pkt->size = sizeof(k_h264High10_444TestFrame);
+            testFrameKind = PlankFfmpegTestFrameKind::H264High10_444;
             break;
         case VIDEO_FORMAT_H265_REXT8_444:
             if (params->enableIdentityGbr) {
-                m_Pkt->data = (uint8_t*)k_HEVCRExt8_444IdentityGbrTestFrame;
-                m_Pkt->size = sizeof(k_HEVCRExt8_444IdentityGbrTestFrame);
+                testFrameKind = PlankFfmpegTestFrameKind::HevcRext8_444IdentityGbr;
             }
             else {
-                m_Pkt->data = (uint8_t*)k_HEVCRExt8_444TestFrame;
-                m_Pkt->size = sizeof(k_HEVCRExt8_444TestFrame);
+                testFrameKind = PlankFfmpegTestFrameKind::HevcRext8_444;
             }
             break;
         case VIDEO_FORMAT_H265_REXT10_444:
             if (params->enableIdentityGbr) {
-                m_Pkt->data = (uint8_t*)k_HEVCRExt10_444IdentityGbrTestFrame;
-                m_Pkt->size = sizeof(k_HEVCRExt10_444IdentityGbrTestFrame);
+                testFrameKind = PlankFfmpegTestFrameKind::HevcRext10_444IdentityGbr;
             }
             else {
-                m_Pkt->data = (uint8_t*)k_HEVCRExt10_444TestFrame;
-                m_Pkt->size = sizeof(k_HEVCRExt10_444TestFrame);
+                testFrameKind = PlankFfmpegTestFrameKind::HevcRext10_444;
             }
             break;
         case VIDEO_FORMAT_AV1_HIGH8_444:
-            m_Pkt->data = (uint8_t*)k_AV1High8_444TestFrame;
-            m_Pkt->size = sizeof(k_AV1High8_444TestFrame);
+            testFrameKind = PlankFfmpegTestFrameKind::Av1High8_444;
             break;
         case VIDEO_FORMAT_AV1_HIGH10_444:
-            m_Pkt->data = (uint8_t*)k_AV1High10_444TestFrame;
-            m_Pkt->size = sizeof(k_AV1High10_444TestFrame);
+            testFrameKind = PlankFfmpegTestFrameKind::Av1High10_444;
             break;
         default:
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -673,6 +657,11 @@ bool FFmpegVideoDecoder::completeInitialization(const AVCodec* decoder, enum AVP
                          params->videoFormat);
             return false;
         }
+
+        const auto testFrameView = plankFfmpegTestFrame(testFrameKind);
+        SDL_assert(testFrameView.data != nullptr && testFrameView.size != 0);
+        m_Pkt->data = const_cast<uint8_t*>(testFrameView.data);
+        m_Pkt->size = static_cast<int>(testFrameView.size);
 
         AVFrame* frame = av_frame_alloc();
         if (!frame) {
