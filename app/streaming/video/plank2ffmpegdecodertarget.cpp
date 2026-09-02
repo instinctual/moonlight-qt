@@ -209,7 +209,7 @@ namespace {
     }
 
     bool available() const override {
-      return avcodec_find_decoder(AV_CODEC_ID_H264) != nullptr &&
+      return avcodec_find_decoder(AV_CODEC_ID_H264) != nullptr ||
              avcodec_find_decoder(AV_CODEC_ID_HEVC) != nullptr;
     }
 
