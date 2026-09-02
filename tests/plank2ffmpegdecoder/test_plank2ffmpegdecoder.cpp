@@ -54,9 +54,11 @@ int main() {
   require(target && target->available(), "software codecs are unavailable");
 
   for (const auto tuple : exact_tuples) {
-    require(target->qualifies(tuple.profile_id, tuple.pixel_layout,
-                              PLANK_MEDIA_MEMORY_CPU_V1),
-            "an exact profile test frame did not qualify");
+    if (!target->qualifies(tuple.profile_id, tuple.pixel_layout,
+                           PLANK_MEDIA_MEMORY_CPU_V1)) {
+      std::cerr << "Rejected profile ID " << tuple.profile_id << '\n';
+      fail("an exact profile test frame did not qualify");
+    }
     require(!target->qualifies(tuple.profile_id,
                                PLANK_MEDIA_PIXEL_BGRX8_V1,
                                PLANK_MEDIA_MEMORY_CPU_V1),

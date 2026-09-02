@@ -73,15 +73,33 @@ namespace {
 
   bool frame_matches(const AVFrame *frame, const profile_spec_t &spec,
                      std::uint32_t width = 0U, std::uint32_t height = 0U) {
-    if (frame == nullptr || frame->format != spec.pixel_format ||
-        (width != 0U && frame->width != static_cast<int>(width)) ||
-        (height != 0U && frame->height != static_cast<int>(height)) ||
-        frame->color_range != AVCOL_RANGE_JPEG) {
-      return false;
+    const bool matches = frame != nullptr &&
+      frame->format == spec.pixel_format &&
+      (width == 0U || frame->width == static_cast<int>(width)) &&
+      (height == 0U || frame->height == static_cast<int>(height)) &&
+      frame->color_range == AVCOL_RANGE_JPEG &&
+      (spec.identity_gbr ? frame->colorspace == AVCOL_SPC_RGB
+                         : frame->colorspace == AVCOL_SPC_BT709);
+    if (!matches) {
+      av_log(nullptr, AV_LOG_WARNING,
+             "PLANK2 exact decoder frame mismatch: profile=%u "
+             "format=%s expected=%s matrix=%d expected-matrix=%d "
+             "range=%d expected-range=%d size=%dx%d expected=%ux%u\n",
+             spec.profile_id,
+             frame != nullptr && av_get_pix_fmt_name(
+               static_cast<AVPixelFormat>(frame->format)) != nullptr
+               ? av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format))
+               : "unavailable",
+             av_get_pix_fmt_name(spec.pixel_format) != nullptr
+               ? av_get_pix_fmt_name(spec.pixel_format) : "unavailable",
+             frame != nullptr ? frame->colorspace : AVCOL_SPC_UNSPECIFIED,
+             spec.identity_gbr ? AVCOL_SPC_RGB : AVCOL_SPC_BT709,
+             frame != nullptr ? frame->color_range : AVCOL_RANGE_UNSPECIFIED,
+             AVCOL_RANGE_JPEG,
+             frame != nullptr ? frame->width : 0,
+             frame != nullptr ? frame->height : 0, width, height);
     }
-    return spec.identity_gbr
-      ? frame->colorspace == AVCOL_SPC_RGB
-      : frame->colorspace == AVCOL_SPC_BT709;
+    return matches;
   }
 
   void configure_context(AVCodecContext *context,
