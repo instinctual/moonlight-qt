@@ -16,9 +16,11 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <numeric>
 #include <vector>
@@ -1083,19 +1085,23 @@ bool PlVkRenderer::isSurfacePresentationSupportedByPhysicalDevice(
     return false;
 }
 
-void PlVkRenderer::waitToRender()
+bool PlVkRenderer::waitForSubmittedFrames(bool forceWait)
 {
     // Check if the GPU has failed before doing anything else
-    if (pl_gpu_is_failed(m_Vulkan->gpu)) {
+    if (m_Vulkan == nullptr || pl_gpu_is_failed(m_Vulkan->gpu)) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                      "GPU is in failed state. Recreating renderer.");
         SDL_Event event;
         event.type = SDL_EVENT_RENDER_DEVICE_RESET;
         SDL_PushEvent(&event);
-        return;
+        return false;
     }
 
-#ifndef Q_OS_WIN32
+#ifdef Q_OS_WIN32
+    if (!forceWait) return true;
+#else
+    Q_UNUSED(forceWait);
+#endif
     // With libplacebo's Vulkan backend, all swap_buffers does is wait for queued
     // presents to finish. This happens to be exactly what we want to do here, since
     // it lets us wait to select a queued frame for rendering until we know that we
@@ -1106,8 +1112,12 @@ void PlVkRenderer::waitToRender()
     for (auto& target : m_PresentationTargets) {
         pl_swapchain_swap_buffers(target.swapchain);
     }
-#endif
+    return !pl_gpu_is_failed(m_Vulkan->gpu);
+}
 
+bool PlVkRenderer::acquirePresentationFrames()
+{
+    bool acquired = false;
     for (auto& target : m_PresentationTargets) {
         int drawableWidth = 0;
         int drawableHeight = 0;
@@ -1120,8 +1130,16 @@ void PlVkRenderer::waitToRender()
         if (pl_swapchain_start_frame(target.swapchain,
                                      &target.swapchainFrame)) {
             target.hasPendingSwapchainFrame = true;
+            acquired = true;
         }
     }
+    return acquired;
+}
+
+void PlVkRenderer::waitToRender()
+{
+    if (!waitForSubmittedFrames(false)) return;
+    acquirePresentationFrames();
 }
 
 void PlVkRenderer::cleanupRenderContext()
@@ -1136,7 +1154,8 @@ void PlVkRenderer::cleanupRenderContext()
     }
 }
 
-void PlVkRenderer::renderFrame(AVFrame *frame)
+PlVkRenderer::FrameSubmissionResult
+PlVkRenderer::renderFrameChecked(AVFrame *frame)
 {
     pl_frame mappedFrame;
     bool importedHostFrame = false;
@@ -1147,12 +1166,13 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         return target.hasPendingSwapchainFrame;
     });
     if (!hasPendingTarget) {
-        return;
+        return FrameSubmissionResult::NoDrawableTarget;
     }
 
     if (!mapAvFrameToPlacebo(frame, &mappedFrame, &importedHostFrame)) {
         // This function logs internally
-        return;
+        cleanupRenderContext();
+        return FrameSubmissionResult::Failed;
     }
 
     // Adjust the swapchain if the colorspace of incoming frames has changed
@@ -1247,6 +1267,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
     const QSize streamSize(mappedFrame.crop.x1 - mappedFrame.crop.x0,
                            mappedFrame.crop.y1 - mappedFrame.crop.y0);
     bool rendererResetRequired = false;
+    bool rendererFailed = false;
     for (auto& target : m_PresentationTargets) {
         if (!target.hasPendingSwapchainFrame) {
             continue;
@@ -1291,6 +1312,7 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
                                  &pl_render_fast_params)) {
                 SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                              "pl_render_image() failed for PLANK output");
+                rendererFailed = true;
             }
         }
 
@@ -1318,7 +1340,91 @@ void PlVkRenderer::renderFrame(AVFrame *frame)
         event.type = SDL_EVENT_RENDER_DEVICE_RESET;
         SDL_PushEvent(&event);
     }
+
+    return rendererResetRequired || rendererFailed
+            ? FrameSubmissionResult::Failed
+            : FrameSubmissionResult::Submitted;
 }
+
+void PlVkRenderer::renderFrame(AVFrame *frame)
+{
+    (void)renderFrameChecked(frame);
+}
+
+#ifdef PLANK2_RETAINED_CLIENT_ADAPTERS
+namespace {
+std::uint64_t plank2MonotonicTimestampNs()
+{
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    return elapsed > 0 ? static_cast<std::uint64_t>(elapsed) : 0U;
+}
+}
+
+bool PlVkRenderer::plank2PresentationAvailable() const
+{
+    return m_Vulkan != nullptr && m_Renderer != nullptr &&
+            !m_PresentationTargets.empty() &&
+            std::all_of(m_PresentationTargets.begin(),
+                        m_PresentationTargets.end(),
+                        [](const auto& target) {
+        return target.window != nullptr && target.swapchain != nullptr;
+    });
+}
+
+bool PlVkRenderer::plank2TestPresentationFrame(AVFrame* frame)
+{
+    return plank2PresentationAvailable() && frame != nullptr &&
+            testRenderFrame(frame);
+}
+
+Plank2SdlVulkanPresentResult PlVkRenderer::plank2PresentFrame(
+        AVFrame* frame,
+        std::uint64_t targetPresentTimestampNs,
+        std::uint64_t& actualPresentTimestampNs)
+{
+    actualPresentTimestampNs = 0U;
+    if (!plank2PresentationAvailable() || frame == nullptr ||
+            !waitForSubmittedFrames(true)) {
+        return Plank2SdlVulkanPresentResult::Failed;
+    }
+
+    if (targetPresentTimestampNs != 0U) {
+        if (targetPresentTimestampNs >
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int64_t>::max())) {
+            return Plank2SdlVulkanPresentResult::Failed;
+        }
+        const auto now = plank2MonotonicTimestampNs();
+        if (targetPresentTimestampNs > now) {
+            SDL_DelayPrecise(targetPresentTimestampNs - now);
+        }
+    }
+
+    if (!acquirePresentationFrames()) {
+        return Plank2SdlVulkanPresentResult::NoDrawableTarget;
+    }
+    const auto result = renderFrameChecked(frame);
+    if (result == FrameSubmissionResult::NoDrawableTarget) {
+        return Plank2SdlVulkanPresentResult::NoDrawableTarget;
+    }
+    if (result == FrameSubmissionResult::Failed ||
+            !waitForSubmittedFrames(true)) {
+        return Plank2SdlVulkanPresentResult::Failed;
+    }
+    actualPresentTimestampNs = plank2MonotonicTimestampNs();
+    return actualPresentTimestampNs != 0U
+            ? Plank2SdlVulkanPresentResult::Presented
+            : Plank2SdlVulkanPresentResult::Failed;
+}
+
+bool PlVkRenderer::plank2ResetPresentation()
+{
+    if (!plank2PresentationAvailable()) return false;
+    cleanupRenderContext();
+    return waitForSubmittedFrames(true);
+}
+#endif
 
 bool PlVkRenderer::testRenderFrame(AVFrame *frame)
 {

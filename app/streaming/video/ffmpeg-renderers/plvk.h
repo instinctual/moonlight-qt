@@ -2,6 +2,10 @@
 
 #include "renderer.h"
 
+#ifdef PLANK2_RETAINED_CLIENT_ADAPTERS
+#include "streaming/video/plank2sdlvulkanpresentationtarget.h"
+#endif
+
 #ifdef Q_OS_WIN32
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
@@ -14,7 +18,11 @@
 #include <unordered_map>
 #include <vector>
 
-class PlVkRenderer : public IFFmpegRenderer {
+class PlVkRenderer : public IFFmpegRenderer
+#ifdef PLANK2_RETAINED_CLIENT_ADAPTERS
+        , public IPlank2SdlVulkanFrameSink
+#endif
+{
 public:
     PlVkRenderer(bool hwaccel = false, IFFmpegRenderer *backendRenderer = nullptr);
     virtual ~PlVkRenderer() override;
@@ -35,7 +43,23 @@ public:
     virtual AVPixelFormat getPreferredPixelFormat(int videoFormat) override;
     virtual RendererType getRendererType() override;
 
+#ifdef PLANK2_RETAINED_CLIENT_ADAPTERS
+    bool plank2PresentationAvailable() const override;
+    bool plank2TestPresentationFrame(AVFrame* frame) override;
+    Plank2SdlVulkanPresentResult plank2PresentFrame(
+            AVFrame* frame,
+            std::uint64_t targetPresentTimestampNs,
+            std::uint64_t& actualPresentTimestampNs) override;
+    bool plank2ResetPresentation() override;
+#endif
+
 private:
+    enum class FrameSubmissionResult {
+        Submitted,
+        NoDrawableTarget,
+        Failed,
+    };
+
     enum class SoftwareFrameAllocator {
         System,
         MappedVulkan,
@@ -53,6 +77,9 @@ private:
                              bool* importedHostFrame);
     bool mapImportedHostFrameToPlacebo(const AVFrame *frame, pl_frame* mappedFrame);
     void unmapAvFrameFromPlacebo(pl_frame* mappedFrame, bool importedHostFrame);
+    bool waitForSubmittedFrames(bool forceWait);
+    bool acquirePresentationFrames();
+    FrameSubmissionResult renderFrameChecked(AVFrame* frame);
     AVBufferRef* getImportedHostBufferRef(size_t size);
     bool getQueue(VkQueueFlags requiredFlags, uint32_t* queueIndex, uint32_t* queueCount);
     bool chooseVulkanDevice(PDECODER_PARAMETERS params, bool hdrOutputRequired);
