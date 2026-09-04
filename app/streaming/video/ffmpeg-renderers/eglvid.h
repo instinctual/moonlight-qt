@@ -82,6 +82,7 @@ private:
     int m_OldContextProfileMask;
     int m_OldContextMajorVersion;
     int m_OldContextMinorVersion;
+    int m_OldColorSizes[4] = {8, 8, 8, 0};
 
     std::vector<SDL_Renderer*> m_DummyRenderers;
 

@@ -61,6 +61,10 @@ typedef struct _OVERLAY_VERTEX
 SDL_Window* EGLRenderer::s_LastFailedWindow = nullptr;
 int EGLRenderer::s_LastFailedVideoFormat = 0;
 
+static constexpr SDL_GLAttr kColorSizeAttributes[] = {
+    SDL_GL_RED_SIZE, SDL_GL_GREEN_SIZE, SDL_GL_BLUE_SIZE, SDL_GL_ALPHA_SIZE
+};
+
 EGLRenderer::EGLRenderer(IFFmpegRenderer *backendRenderer)
     :
         m_EGLImagePixelFormat(AV_PIX_FMT_NONE),
@@ -99,6 +103,9 @@ EGLRenderer::EGLRenderer(IFFmpegRenderer *backendRenderer)
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, &m_OldContextProfileMask);
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &m_OldContextMajorVersion);
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &m_OldContextMinorVersion);
+    for (int i = 0; i < 4; ++i) {
+        SDL_GL_GetAttribute(kColorSizeAttributes[i], &m_OldColorSizes[i]);
+    }
 }
 
 EGLRenderer::~EGLRenderer()
@@ -150,6 +157,9 @@ EGLRenderer::~EGLRenderer()
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, m_OldContextProfileMask);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, m_OldContextMajorVersion);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, m_OldContextMinorVersion);
+    for (int i = 0; i < 4; ++i) {
+        SDL_GL_SetAttribute(kColorSizeAttributes[i], m_OldColorSizes[i]);
+    }
 }
 
 bool EGLRenderer::prepareDecoderContext(AVCodecContext*, AVDictionary**)
@@ -487,6 +497,18 @@ bool EGLRenderer::initialize(PDECODER_PARAMETERS params)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 
+    // DMA-BUF import precision alone is insufficient: the window framebuffer
+    // must also preserve the selected profile. Configure before SDL creates
+    // the dummy renderer (and its EGL window surface), not after it.
+    const int colorBits = (params->videoFormat & VIDEO_FORMAT_MASK_10BIT) ? 10 : 8;
+    for (int i = 0; i < 4; ++i) {
+        const int size = i == 3 ? (colorBits == 10 ? 2 : 8) : colorBits;
+        if (!SDL_GL_SetAttribute(kColorSizeAttributes[i], size)) {
+            EGL_LOG(Error, "Cannot request profile framebuffer precision: %s", SDL_GetError());
+            return false;
+        }
+    }
+
     const char* renderDriver = nullptr;
     int maxRenderers = SDL_GetNumRenderDrivers();
     SDL_assert(maxRenderers >= 0);
@@ -561,19 +583,21 @@ bool EGLRenderer::initialize(PDECODER_PARAMETERS params)
                     SDL_GetError());
             return false;
         }
+        int sizes[4] = {};
+        for (int i = 0; i < 4; ++i) {
+            if (!SDL_GL_GetAttribute(kColorSizeAttributes[i], &sizes[i])) {
+                EGL_LOG(Error, "Cannot verify output framebuffer precision: %s", SDL_GetError());
+                return false;
+            }
+        }
+        EGL_LOG(Info, "Output color buffer is: R%dG%dB%dA%d (profile: %d-bit)",
+                sizes[0], sizes[1], sizes[2], sizes[3], colorBits);
+        if (sizes[0] < colorBits || sizes[1] < colorBits || sizes[2] < colorBits) {
+            EGL_LOG(Error, "Output framebuffer cannot preserve the selected profile precision");
+            return false;
+        }
     }
     SDL_GL_MakeCurrent(m_Window, m_Context);
-
-    {
-        int r, g, b, a;
-        SDL_GL_GetAttribute(SDL_GL_RED_SIZE, &r);
-        SDL_GL_GetAttribute(SDL_GL_GREEN_SIZE, &g);
-        SDL_GL_GetAttribute(SDL_GL_BLUE_SIZE, &b);
-        SDL_GL_GetAttribute(SDL_GL_ALPHA_SIZE, &a);
-        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "Color buffer is: R%dG%dB%dA%d",
-                    r, g, b, a);
-    }
 
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &m_GlesMajorVersion);
     SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &m_GlesMinorVersion);
