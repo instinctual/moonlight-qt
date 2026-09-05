@@ -15,6 +15,7 @@
 #include <Limelight.h>
 #include <opus_multistream.h>
 #include "settings/streamingpreferences.h"
+#include "backend/desktopstage.h"
 #include "input/input.h"
 #include "video/decoder.h"
 #include "audio/renderers/renderer.h"
@@ -392,7 +393,7 @@ private:
     bool m_UnexpectedTermination;
     std::atomic_bool m_ReconnectRequested;
     std::atomic<Uint64> m_DesktopHandoffNoticeDeadline {0};
-    std::atomic_bool m_ReconnectGreeterConfirmed {false};
+    std::atomic<PlankDesktopStage> m_ReconnectDesktopStage {PlankDesktopStage::Unknown};
     std::atomic<Uint64> m_LastPlankVideoReceived {0};
     QString m_PlankWorkerInstance;
     QString m_PlankHostCertificateSha256;

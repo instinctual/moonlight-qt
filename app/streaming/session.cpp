@@ -2963,7 +2963,7 @@ bool Session::beginPlankReconnect(
     }
 
     m_Reconnecting.store(true);
-    m_ReconnectGreeterConfirmed.store(false);
+    m_ReconnectDesktopStage.store(PlankDesktopStage::Unknown);
     const bool openingDesktop = m_DesktopHandoffNoticeDeadline.exchange(0) > SDL_GetTicks();
     setPlankReconnectStatus(
                 openingDesktop ? "Opening your desktop..." : "Waiting for workstation...", false);
@@ -3023,13 +3023,12 @@ bool Session::runPlankReconnect()
                 m_Computer->currentGameId = 0;
             }
             NvHTTP http(m_Computer);
-            bool greeterConfirmed = false;
+            PlankDesktopStage desktopStage = PlankDesktopStage::Unknown;
             const QString token = http.authenticate(
                         m_PlankUsername,
-                        m_PlankPassword, &greeterConfirmed);
-            if (greeterConfirmed &&
-                    (m_Computer->plankFeatureFlags & NvOutputTopology::AuthenticatedDesktopStageFeature)) {
-                m_ReconnectGreeterConfirmed.store(true);
+                        m_PlankPassword, &desktopStage);
+            if (m_Computer->plankFeatureFlags & NvOutputTopology::AuthenticatedDesktopStageFeature) {
+                m_ReconnectDesktopStage.store(desktopStage);
             }
 
             NvOutputTopology topology;
@@ -3128,7 +3127,7 @@ bool Session::finishPlankReconnect(
     }
 
     m_Reconnecting.store(false);
-    m_ReconnectGreeterConfirmed.store(false);
+    m_ReconnectDesktopStage.store(PlankDesktopStage::Unknown);
     m_DesktopHandoffNoticeDeadline.store(0);
     setPlankReconnectStatus("", false);
     m_ReconnectRequested = false;
@@ -3825,14 +3824,17 @@ void Session::execInternal()
             }
         }
 
-        // The old desktop worker may lose Xorg before it can send a logout
-        // notice. Use the replacement worker's authenticated stage instead.
-        // Apply only on the SDL thread and never override an expired timeout.
-        if (m_ReconnectGreeterConfirmed.exchange(false) && m_Reconnecting.load() &&
-                reconnectDecisionDeadline != 0 && SDL_GetTicks() < reconnectDecisionDeadline) {
-            setPlankReconnectStatus("Returning to the sign-in screen...", false);
+        // Either old worker may lose capture before it can send a handoff
+        // notice. Use the replacement worker's authenticated stage for both
+        // login and logout. Apply only on the SDL thread, within the timeout.
+        const char* desktopStatus = plankReconnectDesktopStatus(
+                    m_ReconnectDesktopStage.exchange(PlankDesktopStage::Unknown),
+                    m_Reconnecting.load(), m_ReconnectCancelled.load(),
+                    SDL_GetTicks(), reconnectDecisionDeadline);
+        if (desktopStatus != nullptr) {
+            setPlankReconnectStatus(desktopStatus, false);
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "Authenticated Host confirmed return to the sign-in screen");
+                        "Authenticated Host confirmed reconnect stage: %s", desktopStatus);
         }
 
         if (m_Reconnecting.load() && reconnectDecisionDeadline != 0 &&

@@ -591,9 +591,9 @@ bool NvHTTP::probeWorkerReplacement(const QString& instance, const QString& cert
                 QByteArray::fromHex(certificateSha256.toLatin1()), certificate);
 }
 
-QString NvHTTP::authenticate(QString username, QString password, bool* greeterConfirmed)
+QString NvHTTP::authenticate(QString username, QString password, PlankDesktopStage* desktopStage)
 {
-    if (greeterConfirmed != nullptr) *greeterConfirmed = false;
+    if (desktopStage != nullptr) *desktopStage = PlankDesktopStage::Unknown;
     SecureStringGuard passwordGuard(password);
     if (!m_SessionToken.isEmpty() || username.isEmpty()) {
         throw GfeHttpResponseException(400, "Invalid PLANK authentication state");
@@ -607,8 +607,8 @@ QString NvHTTP::authenticate(QString username, QString password, bool* greeterCo
             if (m_SessionToken.isEmpty()) {
                 throw GfeHttpResponseException(401, "Authentication returned no session token");
             }
-            if (greeterConfirmed != nullptr) {
-                *greeterConfirmed = plankAuthenticatedGreeter(result);
+            if (desktopStage != nullptr) {
+                *desktopStage = plankAuthenticatedDesktopStage(result);
             }
             return m_SessionToken;
         }

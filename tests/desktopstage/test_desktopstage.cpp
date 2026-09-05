@@ -44,30 +44,61 @@ private slots:
         }
     }
 
-    void requiresAuthenticatedGreeter()
+    void recognizesOnlyAuthenticatedDesktopStages()
     {
         QJsonObject response {{"state", "authenticated"},
                               {"session_token", "synthetic-test-token"},
                               {"desktop_stage", "greeter"}};
-        QVERIFY(plankAuthenticatedGreeter(response));
-        for (const QString& stage : {QStringLiteral("user"), QStringLiteral("unknown"),
+        QCOMPARE(plankAuthenticatedDesktopStage(response), PlankDesktopStage::Greeter);
+        response["desktop_stage"] = "user";
+        QCOMPARE(plankAuthenticatedDesktopStage(response), PlankDesktopStage::User);
+        for (const QString& stage : {QStringLiteral("User"), QStringLiteral("unknown"),
                                      QStringLiteral("closing"), QStringLiteral("Greeter"), QString()}) {
             response["desktop_stage"] = stage;
-            QVERIFY(!plankAuthenticatedGreeter(response));
+            QCOMPARE(plankAuthenticatedDesktopStage(response), PlankDesktopStage::Unknown);
         }
-        response["desktop_stage"] = "greeter";
-        for (const QString& state : {QStringLiteral("challenge"), QStringLiteral("denied"), QString()}) {
-            response["state"] = state;
-            QVERIFY(!plankAuthenticatedGreeter(response));
+        for (const QString& stage : {QStringLiteral("greeter"), QStringLiteral("user")}) {
+            response["desktop_stage"] = stage;
+            for (const QString& state : {QStringLiteral("challenge"), QStringLiteral("denied"), QString()}) {
+                response["state"] = state;
+                QCOMPARE(plankAuthenticatedDesktopStage(response), PlankDesktopStage::Unknown);
+            }
+            response["state"] = "authenticated";
+            for (const QJsonValue& token : {QJsonValue(), QJsonValue(""), QJsonValue(123), QJsonValue(true)}) {
+                response["session_token"] = token;
+                QCOMPARE(plankAuthenticatedDesktopStage(response), PlankDesktopStage::Unknown);
+            }
+            response.remove("session_token");
+            QCOMPARE(plankAuthenticatedDesktopStage(response), PlankDesktopStage::Unknown);
+            response["session_token"] = "synthetic-test-token";
         }
-        response["state"] = "authenticated";
-        response.remove("session_token");
-        QVERIFY(!plankAuthenticatedGreeter(response));
-        response["session_token"] = "";
-        QVERIFY(!plankAuthenticatedGreeter(response));
-        response["session_token"] = 123;
-        QVERIFY(!plankAuthenticatedGreeter(response));
-        QVERIFY(!plankAuthenticatedGreeter({}));
+        QCOMPARE(plankAuthenticatedDesktopStage({}), PlankDesktopStage::Unknown);
+    }
+
+    void recoversLoginStatusWithoutOldWorkerNotice()
+    {
+        // Replay the observed loss of the greeter stream: no handoff notice
+        // arrives, then the replacement worker authenticates the user desktop.
+        QVERIFY(plankReconnectDesktopStatus(PlankDesktopStage::Unknown, true, false, 1000, 10000) == nullptr);
+        const QJsonObject response {{"state", "authenticated"},
+                                   {"session_token", "synthetic-test-token"},
+                                   {"desktop_stage", "user"}};
+        const auto stage = plankAuthenticatedDesktopStage(response);
+        QCOMPARE(QString::fromUtf8(plankReconnectDesktopStatus(stage, true, false, 2000, 10000)),
+                 QStringLiteral("Opening your desktop..."));
+        QCOMPARE(QString::fromUtf8(plankReconnectDesktopStatus(PlankDesktopStage::Greeter, true, false, 2000, 10000)),
+                 QStringLiteral("Returning to the sign-in screen..."));
+    }
+
+    void preservesTimeoutAndCancellation()
+    {
+        for (const auto stage : {PlankDesktopStage::Greeter, PlankDesktopStage::User}) {
+            QVERIFY(plankReconnectDesktopStatus(stage, false, false, 1000, 10000) == nullptr);
+            QVERIFY(plankReconnectDesktopStatus(stage, true, true, 1000, 10000) == nullptr);
+            QVERIFY(plankReconnectDesktopStatus(stage, true, false, 1000, 0) == nullptr);
+            QVERIFY(plankReconnectDesktopStatus(stage, true, false, 10000, 10000) == nullptr);
+            QVERIFY(plankReconnectDesktopStatus(stage, true, false, 10001, 10000) == nullptr);
+        }
     }
 };
 

@@ -3,6 +3,7 @@
 #include "nvapp.h"
 #include "nvaddress.h"
 #include "outputtopology.h"
+#include "desktopstage.h"
 
 #include <Limelight.h>
 
@@ -146,7 +147,7 @@ public:
 
     void setPlankSessionToken(QString sessionToken);
 
-    QString authenticate(QString username, QString password, bool* greeterConfirmed = nullptr);
+    QString authenticate(QString username, QString password, PlankDesktopStage* desktopStage = nullptr);
     bool probeWorkerReplacement(const QString& instance, const QString& certificateSha256);
     QString workerInstance() const { return m_WorkerInstance; }
     NvOutputTopology getOutputTopology();
