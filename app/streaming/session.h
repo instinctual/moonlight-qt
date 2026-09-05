@@ -350,7 +350,7 @@ private:
     void arCleanup();
 
     static
-    void arDecodeAndPlaySample(char* sampleData, int sampleLength);
+    void arDecodeAndPlaySample(char* sampleData, int sampleLength, uint64_t sourcePtsUs);
 
     static
     int drSetup(int videoFormat, int width, int height, int frameRate, void*, int);

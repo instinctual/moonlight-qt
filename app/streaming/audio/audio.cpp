@@ -149,7 +149,7 @@ void Session::arCleanup()
     s_ActiveSession->m_OpusDecoder = nullptr;
 }
 
-void Session::arDecodeAndPlaySample(char* sampleData, int sampleLength)
+void Session::arDecodeAndPlaySample(char* sampleData, int sampleLength, uint64_t sourcePtsUs)
 {
     int samplesDecoded;
     const quint64 mediaFrameIndex = s_ActiveSession->m_AudioMediaFramesReceived++;
@@ -251,7 +251,7 @@ void Session::arDecodeAndPlaySample(char* sampleData, int sampleLength)
                     s_ActiveSession->m_ActiveAudioConfig.samplesPerFrame * 1000 /
                     s_ActiveSession->m_ActiveAudioConfig.sampleRate;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "PLANK A/V audio clock: media=%llu submit=%llu queue=%d device=%d pending=%d frame=%d correction=%d skipped=%llu raw=%llu catchup=%d",
+                            "PLANK A/V audio clock: media=%llu submit=%llu queue=%d device=%d pending=%d frame=%d correction=%d skipped=%llu raw=%llu catchup=%d source_pts_us=%llu source_valid=%d",
                             static_cast<unsigned long long>(mediaTimeMs),
                             static_cast<unsigned long long>(now),
                             s_ActiveSession->m_AudioRenderer->getQueuedAudioDurationMs(),
@@ -262,7 +262,9 @@ void Session::arDecodeAndPlaySample(char* sampleData, int sampleLength)
                             static_cast<unsigned long long>(
                                 s_ActiveSession->m_AudioRenderer->getSkippedAudioBlockCount()),
                             static_cast<unsigned long long>(uncorrectedMediaTimeMs),
-                            s_ActiveSession->m_AudioRenderer->getAudioBacklogCorrectionPpm());
+                            s_ActiveSession->m_AudioRenderer->getAudioBacklogCorrectionPpm(),
+                            static_cast<unsigned long long>(sourcePtsUs == PLANK_AUDIO_PTS_UNKNOWN ? 0 : sourcePtsUs),
+                            sourcePtsUs != PLANK_AUDIO_PTS_UNKNOWN);
                 s_ActiveSession->m_LastAudioTelemetryTime = now;
             }
         }

@@ -23,7 +23,7 @@ void TestOutputTopology::parsesQualificationVector()
 {
     const QByteArray root = qgetenv("PLANK_REPO_ROOT");
     QVERIFY2(!root.isEmpty(), "PLANK_REPO_ROOT must identify the repository root");
-    QFile file(QString::fromUtf8(root) + "/tests/protocol/output-topology-v13.json");
+    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v14.json");
     QVERIFY(file.open(QIODevice::ReadOnly));
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
     QVERIFY(document.isObject());
@@ -58,7 +58,7 @@ void TestOutputTopology::roundTripsQualificationVector()
 {
     const QByteArray root = qgetenv("PLANK_REPO_ROOT");
     QVERIFY2(!root.isEmpty(), "PLANK_REPO_ROOT must identify the repository root");
-    QFile file(QString::fromUtf8(root) + "/tests/protocol/output-topology-v13.json");
+    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v14.json");
     QVERIFY(file.open(QIODevice::ReadOnly));
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
     NvOutputTopology topology;
@@ -96,7 +96,7 @@ void TestOutputTopology::rejectsDuplicateIdentity()
 void TestOutputTopology::rejectsConfiguredModeMismatch()
 {
     const QByteArray root = qgetenv("PLANK_REPO_ROOT");
-    QFile file(QString::fromUtf8(root) + "/tests/protocol/output-topology-v13.json");
+    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v14.json");
     QVERIFY(file.open(QIODevice::ReadOnly));
     QJsonObject document = QJsonDocument::fromJson(file.readAll()).object();
     QJsonArray outputs = document.value("outputs").toArray();
@@ -184,7 +184,7 @@ void TestOutputTopology::enforcesHostDisplayPolicy()
 void TestOutputTopology::validatesRequestedLayoutGeometry()
 {
     const QByteArray root = qgetenv("PLANK_REPO_ROOT");
-    QFile file(QString::fromUtf8(root) + "/tests/protocol/output-topology-v13.json");
+    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v14.json");
     QVERIFY(file.open(QIODevice::ReadOnly));
     QJsonObject document = QJsonDocument::fromJson(file.readAll()).object();
 

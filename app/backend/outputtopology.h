@@ -34,7 +34,7 @@ struct NvClientDisplay
 
 struct NvOutputTopology
 {
-    static const int ProtocolVersion = 13;
+    static const int ProtocolVersion = 14;
     static const int OutputTopologyFeature = 0x1;
     static const int SelectedOutputFeature = 0x2;
     static const int UnifiedAbsoluteInputFeature = 0x4;
