@@ -169,7 +169,7 @@ GLuint compileShader(GLenum kind, const char* text) {
     return shader;
 }
 
-void eglProof(const char* node, const PlankRetainedDecodedFrame& frame) {
+void eglProof(const char* node, const PlankRetainedDecodedFrame& frame, const AVFrame* reference) {
     const int fd = open(node, O_RDWR | O_CLOEXEC);
     check(fd >= 0, "EGL render node unavailable");
     auto* gbm = gbm_create_device(fd);
@@ -221,8 +221,29 @@ void eglProof(const char* node, const PlankRetainedDecodedFrame& frame) {
         minCode = std::min(minCode, (pixel >> 10) & 1023U);
         maxCode = std::max(maxCode, (pixel >> 10) & 1023U);
     }
-    check(maxCode > minCode, "hardware sample unexpectedly uniform");
-    std::cout << "egl_hardware_lease_sampling=pass green_min=" << minCode << " green_max=" << maxCode << '\n';
+    check(reference && reference->format == AV_PIX_FMT_GBRP10LE &&
+          reference->width == int(frame.width) && reference->height == int(frame.height) &&
+          reference->color_range == AVCOL_RANGE_JPEG && reference->colorspace == AVCOL_SPC_RGB,
+          "software reference is not the exact identity format");
+    unsigned maxError = 0;
+    uint64_t mismatches = 0;
+    constexpr unsigned planes[] = {2, 0, 1}; // GBRP -> RGB
+    for (unsigned y = 0; y < frame.height; ++y) {
+        for (unsigned x = 0; x < frame.width; ++x) {
+            const auto pixel = pixels[size_t(y) * frame.width + x];
+            for (unsigned channel = 0; channel < 3; ++channel) {
+                const auto* row = reinterpret_cast<const uint16_t*>(
+                    reference->data[planes[channel]] + y * reference->linesize[planes[channel]]);
+                const unsigned actual = (pixel >> (channel * 10)) & 1023U;
+                const unsigned error = actual > row[x] ? actual - row[x] : row[x] - actual;
+                maxError = std::max(maxError, error);
+                mismatches += error != 0;
+            }
+        }
+    }
+    std::cout << "egl_hardware_lease_sampling green_min=" << minCode << " green_max=" << maxCode
+              << " max_rgb_code_error=" << maxError << " mismatched_components=" << mismatches << '\n';
+    check(maxError <= 1, "hardware/EGL pixels disagree with exact software reference");
     glDeleteProgram(program); glDeleteShader(vertex); glDeleteShader(fragment);
     glDeleteFramebuffers(1, &framebuffer); glDeleteTextures(1, &output); glDeleteTextures(1, &input);
     check(destroy(display, image), "EGL image destruction failed");
@@ -273,7 +294,24 @@ void hardwareProof(const char* node) {
         std::cout << "object=" << i << " modifier=" << std::hex
                   << descriptor->objects[i].format_modifier << std::dec << '\n';
     }
-    eglProof(node, lease);
+    // Independent software decode is diagnostic comparison only; it is not
+    // part of the hardware path and never feeds the imported image.
+    AVCodecContext* software = avcodec_alloc_context3(codec);
+    AVFrame* reference = av_frame_alloc();
+    packet = av_packet_alloc();
+    check(software && reference && packet && avcodec_open2(software, codec, nullptr) == 0 &&
+          av_new_packet(packet, sample.size) == 0, "software reference initialization failed");
+    std::memcpy(packet->data, sample.data, sample.size);
+    bool referenceReady = false;
+    for (int i = 0; i < 5 && !referenceReady; ++i) {
+        check(avcodec_send_packet(software, packet) >= 0, "software reference submit failed");
+        const int result = avcodec_receive_frame(software, reference);
+        check(result == 0 || result == AVERROR(EAGAIN), "software reference decode failed");
+        referenceReady = result == 0;
+    }
+    check(referenceReady, "software reference missing");
+    eglProof(node, lease, reference);
+    av_frame_free(&reference); av_packet_free(&packet); avcodec_free_context(&software);
     view.reset();
     lease = {};
 }
