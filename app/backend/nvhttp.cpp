@@ -1,4 +1,8 @@
 #include "nvcomputer.h"
+#include "desktopstage.h"
+#include "hostrecovery.h"
+#include <QCryptographicHash>
+#include <QScopedPointer>
 #include <Limelight.h>
 
 #include <utility>
@@ -258,6 +262,11 @@ NvHTTP::startApp(QString verb,
 
     // Throws if the request failed
     verifyResponseStatus(response);
+
+    m_WorkerInstance = PlankHostRecovery::canonicalInstance(getXmlString(response, "PlankWorkerInstance"));
+    if ((plankFeatureFlags & NvOutputTopology::WorkerInstanceFeature) && m_WorkerInstance.isEmpty()) {
+        throw GfeHttpResponseException(400, "Host returned an invalid media-worker identity");
+    }
 
     plankTransportPort = getXmlString(response, "PlankTransportPort").toUShort();
     plankTransportCertificateSha256 =
@@ -568,8 +577,23 @@ QJsonObject NvHTTP::postPlankJson(QString command, const QJsonObject& body)
     return document.object();
 }
 
-QString NvHTTP::authenticate(QString username, QString password)
+bool NvHTTP::probeWorkerReplacement(const QString& instance, const QString& certificateSha256)
 {
+    // Use an address-only NvHTTP, never a bearer token or PAM credentials.
+    if (!m_SessionToken.isEmpty()) return false;
+    QScopedPointer<QNetworkReply> reply(openConnection(m_BaseUrlHttps, "serverinfo", nullptr,
+                                                      1000, NvLogLevel::NVLL_NONE));
+    const QByteArray certificate = reply->sslConfiguration().peerCertificate().digest(QCryptographicHash::Sha256);
+    const QString response = QString::fromUtf8(reply->readAll());
+    verifyResponseStatus(response);
+    return PlankHostRecovery::replacementConfirmed(instance,
+                getXmlString(response, "PlankWorkerInstance"),
+                QByteArray::fromHex(certificateSha256.toLatin1()), certificate);
+}
+
+QString NvHTTP::authenticate(QString username, QString password, bool* greeterConfirmed)
+{
+    if (greeterConfirmed != nullptr) *greeterConfirmed = false;
     SecureStringGuard passwordGuard(password);
     if (!m_SessionToken.isEmpty() || username.isEmpty()) {
         throw GfeHttpResponseException(400, "Invalid PLANK authentication state");
@@ -582,6 +606,9 @@ QString NvHTTP::authenticate(QString username, QString password)
             m_SessionToken = result.value("session_token").toString();
             if (m_SessionToken.isEmpty()) {
                 throw GfeHttpResponseException(401, "Authentication returned no session token");
+            }
+            if (greeterConfirmed != nullptr) {
+                *greeterConfirmed = plankAuthenticatedGreeter(result);
             }
             return m_SessionToken;
         }

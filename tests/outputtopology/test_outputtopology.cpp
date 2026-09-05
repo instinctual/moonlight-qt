@@ -23,7 +23,7 @@ void TestOutputTopology::parsesQualificationVector()
 {
     const QByteArray root = qgetenv("PLANK_REPO_ROOT");
     QVERIFY2(!root.isEmpty(), "PLANK_REPO_ROOT must identify the repository root");
-    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v14.json");
+    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v15.json");
     QVERIFY(file.open(QIODevice::ReadOnly));
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
     QVERIFY(document.isObject());
@@ -33,7 +33,7 @@ void TestOutputTopology::parsesQualificationVector()
     QVERIFY2(NvOutputTopology::fromJson(document.object(), topology, &error), qPrintable(error));
     QCOMPARE(topology.outputs.size(), 2);
     QCOMPARE(topology.desktopWidth, 5120);
-    QCOMPARE(topology.featureFlags & NvOutputTopology::SupportedFeatureFlags, 65535);
+    QCOMPARE(topology.featureFlags & NvOutputTopology::SupportedFeatureFlags, 524287);
     QVERIFY((topology.featureFlags & NvOutputTopology::CaptureSourceSelectionFeature) != 0);
     QVERIFY((topology.featureFlags & NvOutputTopology::EncoderBackendSelectionFeature) != 0);
     QVERIFY((topology.featureFlags & NvOutputTopology::NvfbcHevc10NvencFeature) != 0);
@@ -58,7 +58,7 @@ void TestOutputTopology::roundTripsQualificationVector()
 {
     const QByteArray root = qgetenv("PLANK_REPO_ROOT");
     QVERIFY2(!root.isEmpty(), "PLANK_REPO_ROOT must identify the repository root");
-    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v14.json");
+    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v15.json");
     QVERIFY(file.open(QIODevice::ReadOnly));
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
     NvOutputTopology topology;
@@ -96,7 +96,7 @@ void TestOutputTopology::rejectsDuplicateIdentity()
 void TestOutputTopology::rejectsConfiguredModeMismatch()
 {
     const QByteArray root = qgetenv("PLANK_REPO_ROOT");
-    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v14.json");
+    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v15.json");
     QVERIFY(file.open(QIODevice::ReadOnly));
     QJsonObject document = QJsonDocument::fromJson(file.readAll()).object();
     QJsonArray outputs = document.value("outputs").toArray();
@@ -184,7 +184,7 @@ void TestOutputTopology::enforcesHostDisplayPolicy()
 void TestOutputTopology::validatesRequestedLayoutGeometry()
 {
     const QByteArray root = qgetenv("PLANK_REPO_ROOT");
-    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v14.json");
+    QFile file(QString::fromUtf8(root) + "/tests/common/protocol/output-topology-v15.json");
     QVERIFY(file.open(QIODevice::ReadOnly));
     QJsonObject document = QJsonDocument::fromJson(file.readAll()).object();
 

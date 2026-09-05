@@ -210,6 +210,7 @@ private:
     };
 
     bool beginPlankReconnect(PlankReconnectState& state);
+    void setPlankReconnectStatus(const char* text, bool warning);
 
     bool runPlankReconnect();
 
@@ -390,6 +391,11 @@ private:
     bool m_ThreadedExec;
     bool m_UnexpectedTermination;
     std::atomic_bool m_ReconnectRequested;
+    std::atomic<Uint64> m_DesktopHandoffNoticeDeadline {0};
+    std::atomic_bool m_ReconnectGreeterConfirmed {false};
+    std::atomic<Uint64> m_LastPlankVideoReceived {0};
+    QString m_PlankWorkerInstance;
+    QString m_PlankHostCertificateSha256;
     std::atomic_bool m_Reconnecting;
     std::atomic_bool m_ReconnectCancelled;
     std::atomic_bool m_CanReconnect;

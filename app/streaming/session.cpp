@@ -1,4 +1,5 @@
 #include "session.h"
+#include "backend/hostrecovery.h"
 #include "backend/planknetwork.h"
 #include "settings/streamingpreferences.h"
 #include "streaming/avsynccontroller.h"
@@ -158,7 +159,10 @@ void Session::clConnectionTerminated(int errorCode)
         return;
     }
 
-    if (s_ActiveSession->m_Reconnecting.load()) {
+    // The early worker probe and transport termination can arrive together.
+    // A queued reconnect is already owned by the SDL thread, just like a
+    // running one; duplicate callbacks must not enqueue a fatal quit.
+    if (s_ActiveSession->m_ReconnectRequested.load() || s_ActiveSession->m_Reconnecting.load()) {
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
                     "PLANK reconnect attempt ended: %d", errorCode);
         return;
@@ -230,6 +234,7 @@ void Session::clLogMessage(const char* format, ...)
 
 void Session::clConnectionStatusUpdate(int connectionStatus)
 {
+    if (s_ActiveSession->m_Reconnecting.load()) return;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Connection status update: %d",
                 connectionStatus);
@@ -1104,6 +1109,7 @@ void Session::startPlankTransportMediaReceivers()
     }
     m_CurrentVideoPacketLossPercent.store(-1.0f, std::memory_order_relaxed);
     m_CurrentNetworkRttMs.store(0, std::memory_order_relaxed);
+    m_LastPlankVideoReceived.store(0);
     m_PlankTransportReceiversStopping.store(false);
     m_PlankTransportVideoThread = std::thread([this]() {
         plankTransportVideoReceiveLoop();
@@ -1199,6 +1205,7 @@ void Session::plankTransportVideoReceiveLoop()
             continue;
         }
 
+        m_LastPlankVideoReceived.store(SDL_GetTicks());
         const uint32_t flags =
                 (info.flags & PLANK_TRANSPORT_NATIVE_VIDEO_FLAG_KEY) != 0 ?
                     PLANK_VIDEO_FRAME_FLAG_KEY : 0;
@@ -1281,6 +1288,17 @@ void Session::plankTransportDataReceiveLoop()
                 return;
             }
             switch (control.type) {
+            case PLANK_TRANSPORT_CONTROL_HOST_DESKTOP_HANDOFF:
+                if (control.payload_size != 0 ||
+                        !(m_Computer->plankFeatureFlags & NvOutputTopology::DesktopHandoffNoticeFeature)) {
+                    LiNotifyPlankHostTermination(-1);
+                    return;
+                }
+                // Advisory only. Do not reconnect until the transport actually
+                // closes; a stale notice must not relabel an unrelated outage.
+                m_DesktopHandoffNoticeDeadline.store(SDL_GetTicks() + 5000);
+                qInfo() << "Host announced GDM-to-desktop handoff";
+                break;
             case PLANK_TRANSPORT_CONTROL_VIDEO_BITRATE_APPLIED:
                 if (control.payload_size != 3 * sizeof(uint32_t)) {
                     LiNotifyPlankHostTermination(-1);
@@ -2748,6 +2766,9 @@ bool Session::startConnectionAsync(bool reconnecting,
         // setup fails afterward, the next bounded attempt must resume this
         // app instead of issuing a second launch request.
         if (m_Computer->plankAuthentication) {
+            m_PlankWorkerInstance = (m_Computer->plankFeatureFlags & NvOutputTopology::WorkerInstanceFeature) ?
+                        http->workerInstance() : QString();
+            m_PlankHostCertificateSha256 = plankTransportCertificateSha256;
             QWriteLocker lock(&m_Computer->lock);
             m_Computer->currentGameId = m_App.id;
         }
@@ -2872,6 +2893,26 @@ void Session::respondToActiveSessionTakeover(bool takeOver)
     }
 }
 
+void Session::setPlankReconnectStatus(const char* text, bool warning)
+{
+    const bool nativeStatus = m_PlankToolbar &&
+            m_PlankToolbar->setReconnectStatus(QString::fromUtf8(text), warning);
+    // Reconnect pauses video, so an overlay alone cannot reliably repaint.
+    // Use the native local surface on Wayland; keep the existing fallback for
+    // other presentation platforms without duplicating the message.
+    m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
+    if (!nativeStatus && text[0] != '\0') {
+        m_OverlayManager.setOverlayColor(Overlay::OverlayStatusUpdate,
+                    warning ? SDL_Color{0xCC, 0x00, 0x00, 0xFF} : SDL_Color{0xE0, 0xE0, 0xE0, 0xFF});
+        m_OverlayManager.updateOverlayText(Overlay::OverlayStatusUpdate, text);
+        m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+    }
+    if (text[0] != '\0') {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "PLANK reconnect status (%s): %s",
+                    nativeStatus ? "native local surface" : "video overlay fallback", text);
+    }
+}
+
 bool Session::beginPlankReconnect(
         PlankReconnectState& state)
 {
@@ -2881,10 +2922,10 @@ bool Session::beginPlankReconnect(
     }
 
     m_Reconnecting.store(true);
-    m_OverlayManager.updateOverlayText(
-                Overlay::OverlayStatusUpdate,
-                "Reconnecting to workstation...");
-    m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, true);
+    m_ReconnectGreeterConfirmed.store(false);
+    const bool openingDesktop = m_DesktopHandoffNoticeDeadline.exchange(0) > SDL_GetTicks();
+    setPlankReconnectStatus(
+                openingDesktop ? "Opening your desktop..." : "Waiting for workstation...", false);
 
     m_InputHandler->raiseAllKeys();
     state = {};
@@ -2940,9 +2981,14 @@ bool Session::runPlankReconnect()
                 m_Computer->currentGameId = 0;
             }
             NvHTTP http(m_Computer);
+            bool greeterConfirmed = false;
             const QString token = http.authenticate(
                         m_PlankUsername,
-                        m_PlankPassword);
+                        m_PlankPassword, &greeterConfirmed);
+            if (greeterConfirmed &&
+                    (m_Computer->plankFeatureFlags & NvOutputTopology::AuthenticatedDesktopStageFeature)) {
+                m_ReconnectGreeterConfirmed.store(true);
+            }
 
             NvOutputTopology topology;
             const bool topologySupported =
@@ -3033,10 +3079,15 @@ bool Session::finishPlankReconnect(
     }
 
     m_Reconnecting.store(false);
+    m_ReconnectGreeterConfirmed.store(false);
+    m_DesktopHandoffNoticeDeadline.store(0);
+    setPlankReconnectStatus("", false);
     m_ReconnectRequested = false;
     m_ReconnectCancelled.store(false);
     m_ConnectionStartCancelled.store(false);
     m_OverlayManager.setOverlayState(Overlay::OverlayStatusUpdate, false);
+
+    m_OverlayManager.setOverlayColor(Overlay::OverlayStatusUpdate, {0xCC, 0x00, 0x00, 0xFF});
 
     if (!success) {
         return false;
@@ -3057,6 +3108,35 @@ bool Session::finishPlankReconnect(
                 resumedRenderer ? "retained" : "recreated");
     return true;
 }
+
+// At most one bounded, credential-free probe is outstanding. It owns its
+// address/identity snapshots and never reads or changes Session state.
+class PlankWorkerProbeThread : public QThread
+{
+public:
+    PlankWorkerProbeThread(NvAddress address, QString instance, QString certificate) :
+        m_Address(address), m_Instance(instance), m_Certificate(certificate) { }
+
+    bool replacement() const { return m_Replacement; }
+    const QString& instance() const { return m_Instance; }
+
+    void run() override
+    {
+        try {
+            NvHTTP http(m_Address);
+            m_Replacement = http.probeWorkerReplacement(m_Instance, m_Certificate);
+        } catch (const GfeHttpResponseException&) {
+            // Failure is not proof of a replacement; preserve the live stream.
+        } catch (const QtNetworkReplyException&) {
+        }
+    }
+
+private:
+    NvAddress m_Address;
+    QString m_Instance;
+    QString m_Certificate;
+    bool m_Replacement = false;
+};
 
 class PlankReconnectThread : public QThread
 {
@@ -3556,6 +3636,9 @@ void Session::execInternal()
     // Hijack this thread to be the SDL main thread. We have to do this
     // because we want to suspend all Qt processing until the stream is over.
     PlankReconnectThread* reconnectThread = nullptr;
+    PlankWorkerProbeThread* workerProbe = nullptr;
+    Uint64 nextWorkerProbe = 0;
+    bool earlyWaitingVisible = false;
     PlankReconnectState reconnectState;
     Uint64 reconnectDecisionDeadline = 0;
     const auto handlePlankLocalUserEvent = [this](const SDL_UserEvent& userEvent) {
@@ -3589,6 +3672,38 @@ void Session::execInternal()
     };
     SDL_Event event;
     for (;;) {
+        const Uint64 now = SDL_GetTicks();
+        const bool videoSilent = PlankHostRecovery::videoSilent(now, m_LastPlankVideoReceived.load());
+        if (workerProbe != nullptr && workerProbe->isFinished()) {
+            workerProbe->wait();
+            if (!m_Reconnecting.load() && !m_ReconnectRequested.load() && m_CanReconnect.load() &&
+                    videoSilent && workerProbe->instance() == m_PlankWorkerInstance && workerProbe->replacement()) {
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                            "Confirmed replacement Host worker during video silence; reconnecting before transport timeout");
+                clConnectionTerminated(-2);
+            }
+            delete workerProbe;
+            workerProbe = nullptr;
+            nextWorkerProbe = now + PlankHostRecovery::ProbeIntervalMs;
+        }
+        if (!m_Reconnecting.load() && !m_ReconnectRequested.load()) {
+            if (videoSilent && m_CanReconnect.load() && !m_PlankWorkerInstance.isEmpty()) {
+                if (!earlyWaitingVisible) {
+                    setPlankReconnectStatus("Waiting for workstation...", false);
+                    earlyWaitingVisible = true;
+                }
+                if (workerProbe == nullptr && now >= nextWorkerProbe) {
+                    workerProbe = new PlankWorkerProbeThread(m_Computer->activeAddress,
+                                    m_PlankWorkerInstance, m_PlankHostCertificateSha256);
+                    workerProbe->start();
+                }
+            } else if (earlyWaitingVisible) {
+                setPlankReconnectStatus("", false);
+                earlyWaitingVisible = false;
+            }
+        } else {
+            earlyWaitingVisible = false;
+        }
         if (m_PlankToolbar) {
             m_PlankToolbar->setRenderedStats(
                         m_CurrentRenderedFps.load(std::memory_order_relaxed),
@@ -3621,9 +3736,20 @@ void Session::execInternal()
             }
         }
 
+        // The old desktop worker may lose Xorg before it can send a logout
+        // notice. Use the replacement worker's authenticated stage instead.
+        // Apply only on the SDL thread and never override an expired timeout.
+        if (m_ReconnectGreeterConfirmed.exchange(false) && m_Reconnecting.load() &&
+                reconnectDecisionDeadline != 0 && SDL_GetTicks() < reconnectDecisionDeadline) {
+            setPlankReconnectStatus("Returning to the sign-in screen...", false);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "Authenticated Host confirmed return to the sign-in screen");
+        }
+
         if (m_Reconnecting.load() && reconnectDecisionDeadline != 0 &&
                 (reconnectThread == nullptr || !reconnectThread->isFinished()) &&
                 SDL_GetTicks() >= reconnectDecisionDeadline) {
+            setPlankReconnectStatus("Workstation is taking longer to respond...", true);
             if (m_Preferences->plankUnreachableAction ==
                     StreamingPreferences::PLANK_UNREACHABLE_DISCONNECT) {
                 SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
@@ -4120,6 +4246,13 @@ void Session::execInternal()
     }
 
 DispatchDeferredCleanup:
+    if (workerProbe != nullptr) {
+        // The probe has a one-second HTTP deadline and owns no Session state.
+        SDL_HideWindow(m_Window);
+        workerProbe->wait();
+        delete workerProbe;
+        workerProbe = nullptr;
+    }
     // Uncapture the mouse and hide the window immediately,
     // so we can return to the Qt GUI ASAP.
     if (reconnectThread != nullptr) {

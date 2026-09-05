@@ -34,7 +34,7 @@ struct NvClientDisplay
 
 struct NvOutputTopology
 {
-    static const int ProtocolVersion = 14;
+    static const int ProtocolVersion = 15;
     static const int OutputTopologyFeature = 0x1;
     static const int SelectedOutputFeature = 0x2;
     static const int UnifiedAbsoluteInputFeature = 0x4;
@@ -51,6 +51,9 @@ struct NvOutputTopology
     static const int NvfbcHevc10NvencFeature = 0x2000;
     static const int FixedTransportMtuFeature = 0x4000;
     static const int SessionTakeoverFeature = 0x8000;
+    static const int DesktopHandoffNoticeFeature = 0x10000;
+    static const int AuthenticatedDesktopStageFeature = 0x20000;
+    static const int WorkerInstanceFeature = 0x40000;
     static const int MaximumVirtualCanvasWidth = 8192;
     static const int SupportedFeatureFlags = OutputTopologyFeature |
                                              SelectedOutputFeature |
@@ -67,7 +70,10 @@ struct NvOutputTopology
                                              EncoderBackendSelectionFeature |
                                              NvfbcHevc10NvencFeature |
                                              FixedTransportMtuFeature |
-                                             SessionTakeoverFeature;
+                                             SessionTakeoverFeature |
+                                             DesktopHandoffNoticeFeature |
+                                             AuthenticatedDesktopStageFeature |
+                                             WorkerInstanceFeature;
     static const char* NativeScalingMode;
     static const char* ScaledSpanMode;
     static const char* MatchClientHostLayout;

@@ -273,6 +273,8 @@ SOURCES += \
 HEADERS += \
     backend/nvaddress.h \
     backend/outputtopology.h \
+    backend/desktopstage.h \
+    backend/hostrecovery.h \
     backend/nvapp.h \
     utils.h \
     backend/computerseeker.h \
