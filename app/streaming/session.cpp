@@ -381,6 +381,15 @@ bool Session::chooseDecoder(DecoderSelectionMode selectionMode,
     params.encoderBackend = encoderBackend;
     params.presentationLayout = !testOnly && s_ActiveSession != nullptr ?
                 &s_ActiveSession->m_PresentationLayout : nullptr;
+    if (testOnly) {
+        // Qualification frames are not associated with a remote desktop.
+        params.topologyGeneration = "decoder-qualification";
+    }
+    else if (s_ActiveSession != nullptr) {
+        QReadLocker lock(&s_ActiveSession->m_Computer->lock);
+        params.topologyGeneration =
+                s_ActiveSession->m_Computer->outputTopology.generation.toStdString();
+    }
 
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "V-sync %s",

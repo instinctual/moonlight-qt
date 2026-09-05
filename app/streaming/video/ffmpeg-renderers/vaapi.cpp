@@ -5,6 +5,11 @@
 
 #include "vaapi.h"
 #include "utils.h"
+#if defined(HAVE_EGL) && defined(PLANK2_RETAINED_CLIENT_ADAPTERS)
+#include "streaming/video/plank2vaapiframe.h"
+#include "plank/platform/linux/egl_dma_buf_image_v1.hpp"
+#include "plank/media/profile_v1.h"
+#endif
 #include <streaming/streamutils.h>
 
 #ifdef HAVE_LIBVA_DRM
@@ -43,6 +48,11 @@ VAAPIRenderer::VAAPIRenderer(int decoderSelectionPass)
 
 VAAPIRenderer::~VAAPIRenderer()
 {
+#if defined(HAVE_EGL) && defined(PLANK2_RETAINED_CLIENT_ADAPTERS)
+    // Normal rendering releases the frame synchronously before returning.
+    // Drop any failed-import lease before terminating the VA display.
+    m_Plank2ExportedFrame = {};
+#endif
     if (m_HwContext != nullptr) {
         AVHWDeviceContext* deviceContext = (AVHWDeviceContext*)m_HwContext->data;
         AVVAAPIDeviceContext* vaDeviceContext = (AVVAAPIDeviceContext*)deviceContext->hwctx;
@@ -217,6 +227,19 @@ VAAPIRenderer::initialize(PDECODER_PARAMETERS params)
     m_Window = params->window;
     m_VideoFormat = params->videoFormat;
     m_IdentityGbr = params->enableIdentityGbr;
+#if defined(HAVE_EGL) && defined(PLANK2_RETAINED_CLIENT_ADAPTERS)
+    if (m_IdentityGbr && params->videoFormat == VIDEO_FORMAT_H265_REXT10_444 &&
+            params->encoderBackend == DecoderEncoderBackend::NvencDirect) {
+        m_Plank2ProfileId = params->captureSource == DecoderCaptureSource::NativeX11_10Bit
+                ? PLANK_MEDIA_PROFILE_HEVC_REXT10_444_NVENC_X11_V1
+                : PLANK_MEDIA_PROFILE_HEVC_REXT10_444_NVENC_NVFBC_V1;
+        m_Plank2TopologyGeneration = params->topologyGeneration;
+        if (m_Plank2TopologyGeneration.empty()) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "PLANK2 VA-API frame lease requires a topology identity");
+            return false;
+        }
+    }
+#endif
 
     m_HwContext = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_VAAPI);
     if (!m_HwContext) {
@@ -1190,6 +1213,47 @@ VAAPIRenderer::initializeEGL(EGLDisplay dpy,
 ssize_t
 VAAPIRenderer::exportEGLImages(AVFrame *frame, EGLDisplay dpy,
                                EGLImage images[EGL_MAX_PLANES]) {
+#ifdef PLANK2_RETAINED_CLIENT_ADAPTERS
+    if (m_Plank2ProfileId != 0) {
+        memset(images, 0, sizeof(EGLImage) * EGL_MAX_PLANES);
+        if (m_Plank2ExportedFrame.owner) return -1;
+        m_Plank2Finish = reinterpret_cast<void (*)()>(eglGetProcAddress("glFinish"));
+        if (!m_Plank2Finish) return -1;
+        // The retained reader expresses presentation PTS in milliseconds.
+        // Test frames have no source PTS; use the local sampling clock only
+        // for that otherwise untimed lease, never for presentation scheduling.
+        const auto timestamp = frame->pts > 0 && frame->pts <= INT64_MAX / 1000000
+                ? std::uint64_t(frame->pts) * 1000000U : SDL_GetTicksNS();
+        if (createPlank2VaapiFrameLease(frame, m_Plank2ProfileId,
+                ++m_Plank2FrameSequence, timestamp, m_Plank2ExportedFrame) !=
+                PLANK_BACKEND_OPERATION_OK_V1) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "PLANK2 VA-API frame lease export failed");
+            return -1;
+        }
+        const auto& exported = m_Plank2ExportedFrame;
+        PlankMediaFrameLeaseV1 lease {
+            sizeof(PlankMediaFrameLeaseV1), PLANK_MEDIA_INTERFACE_VERSION,
+            PLANK_MEDIA_FRAME_STAGE_DECODED_V1, exported.profileId, exported.pixelLayout,
+            exported.memoryKind, exported.planeCount, exported.width, exported.height,
+            exported.frameSequence, exported.monotonicTimestampNs,
+            m_Plank2TopologyGeneration.c_str(), exported.frameSequence, {}, 0U,
+        };
+        for (std::uint16_t i = 0; i < exported.planeCount; ++i) lease.planes[i] = exported.planes[i];
+        images[0] = plank::platform::linux_backend::import_identity_dma_buf_image_v1(dpy, lease);
+        if (!images[0]) {
+            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "PLANK2 leased DMA-BUF EGL import failed: %x", eglGetError());
+            m_Plank2ExportedFrame = {};
+            return -1;
+        }
+        if (!m_Plank2ExportLogged) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "PLANK2 VA-API frame lease -> EGL identity import active: profile=%u planes=%u; no CPU pixel copy",
+                        unsigned(exported.profileId), unsigned(exported.planeCount));
+            m_Plank2ExportLogged = true;
+        }
+        return 1;
+    }
+#endif
     ssize_t count;
     uint32_t exportFlags = VA_EXPORT_SURFACE_READ_ONLY;
 
@@ -1245,6 +1309,16 @@ fail:
 
 void
 VAAPIRenderer::freeEGLImages(EGLDisplay dpy, EGLImage images[EGL_MAX_PLANES]) {
+#ifdef PLANK2_RETAINED_CLIENT_ADAPTERS
+    if (m_Plank2ExportedFrame.owner) {
+        // Completion is explicit: the decoder surface cannot be recycled
+        // while any output context still reads the imported image.
+        m_Plank2Finish();
+        m_EglImageFactory.freeEGLImages(dpy, images);
+        m_Plank2ExportedFrame = {};
+        return;
+    }
+#endif
     m_EglImageFactory.freeEGLImages(dpy, images);
     for (size_t i = 0; i < m_PrimeDescriptor.num_objects; ++i) {
         close(m_PrimeDescriptor.objects[i].fd);

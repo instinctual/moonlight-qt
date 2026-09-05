@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include <QSize>
 #include <Limelight.h>
@@ -73,6 +74,8 @@ typedef struct _DECODER_PARAMETERS {
     bool enableIdentityGbr;
     bool testOnly;
     const PlankPresentationLayout* presentationLayout;
+    // Immutable Host topology snapshot for this decoder lifetime.
+    std::string topologyGeneration;
 } DECODER_PARAMETERS, *PDECODER_PARAMETERS;
 
 #define WINDOW_STATE_CHANGE_SIZE 0x01

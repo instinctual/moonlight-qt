@@ -10,6 +10,9 @@
 
 #ifdef HAVE_EGL
 #include "eglimagefactory.h"
+#ifdef PLANK2_RETAINED_CLIENT_ADAPTERS
+#include "streaming/video/plank2decodersource.h"
+#endif
 #endif
 
 extern "C" {
@@ -108,5 +111,13 @@ private:
     } m_EglExportType;
     VADRMPRIMESurfaceDescriptor m_PrimeDescriptor;
     EglImageFactory m_EglImageFactory;
+#ifdef PLANK2_RETAINED_CLIENT_ADAPTERS
+    std::uint16_t m_Plank2ProfileId = 0;
+    std::uint64_t m_Plank2FrameSequence = 0;
+    std::string m_Plank2TopologyGeneration;
+    PlankRetainedDecodedFrame m_Plank2ExportedFrame;
+    void (*m_Plank2Finish)() = nullptr;
+    bool m_Plank2ExportLogged = false;
+#endif
 #endif
 };
