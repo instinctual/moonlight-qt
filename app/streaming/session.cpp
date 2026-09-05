@@ -1159,6 +1159,30 @@ void Session::plankTransportVideoReceiveLoop()
             return;
         }
 
+        if (m_AvSyncTelemetryEnabled) {
+            uint64_t nativeNowUs = 0;
+            const Uint64 ticksBefore = SDL_GetTicks();
+            const int clockResult = plank_transport_clock_now_us(&nativeNowUs);
+            const Uint64 ticksAfter = SDL_GetTicks();
+            // Correlate diagnostic SDL render/submit ticks with Kyber's local
+            // clock. No mapped value feeds scheduling or audio correction.
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "PLANK A/V native clock: valid=%u offset_us=%lld delay_us=%lld "
+                        "measured_us=%lld age_us=%llu success=%llu failed=%llu "
+                        "local_us=%llu local_valid=%d ticks_before=%llu ticks_after=%llu",
+                        stats.clock.valid,
+                        static_cast<long long>(stats.clock.offset_us),
+                        static_cast<long long>(stats.clock.delay_us),
+                        static_cast<long long>(stats.clock.measured_at_client_us),
+                        static_cast<unsigned long long>(stats.clock.age_us),
+                        static_cast<unsigned long long>(stats.clock.successful_batches),
+                        static_cast<unsigned long long>(stats.clock.failed_batches),
+                        static_cast<unsigned long long>(nativeNowUs),
+                        clockResult == PLANK_TRANSPORT_OK,
+                        static_cast<unsigned long long>(ticksBefore),
+                        static_cast<unsigned long long>(ticksAfter));
+        }
+
         const std::uint64_t roundedRttMs =
                 (stats.quic_rtt_us + 500) / 1000;
         m_CurrentNetworkRttMs.store(
