@@ -20,6 +20,7 @@ extern "C" {
 #include <unistd.h>
 #include <vector>
 #include <algorithm>
+#include <fstream>
 
 namespace {
 void check(bool ok, const char* detail) {
@@ -31,6 +32,7 @@ int exportedFd = -1;
 int fault = 0;
 unsigned exports = 0;
 unsigned syncs = 0;
+unsigned storageHeight = 720;
 VAStatus exportFake(VADisplay, VASurfaceID, uint32_t type, uint32_t flags, void* output) {
     ++exports;
     check(type == VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2 &&
@@ -40,7 +42,7 @@ VAStatus exportFake(VADisplay, VASurfaceID, uint32_t type, uint32_t flags, void*
     auto& desc = *static_cast<VADRMPRIMESurfaceDescriptor*>(output);
     exportedFd = fcntl(originalFd, F_DUPFD_CLOEXEC, 0);
     check(exportedFd >= 0, "fd duplication failed");
-    desc.width = 1280; desc.height = 720; desc.num_objects = 1; desc.num_layers = 1;
+    desc.width = 1280; desc.height = storageHeight; desc.num_objects = 1; desc.num_layers = 1;
     desc.objects[0].fd = exportedFd;
     desc.objects[0].size = 4U * 1024U * 1024U;
     desc.objects[0].drm_format_modifier = UINT64_C(0x0100000000000008);
@@ -99,6 +101,7 @@ void fakeProof() {
     check(decoded->buf[0] && decoded->hw_frames_ctx, "frame context allocation failed");
     auto* frames = reinterpret_cast<AVHWFramesContext*>(decoded->hw_frames_ctx->data);
     frames->format = AV_PIX_FMT_VAAPI; frames->sw_format = AV_PIX_FMT_XV30LE;
+    frames->width = 1280; frames->height = 720;
     frames->device_ctx = &device;
     decoded->format = AV_PIX_FMT_VAAPI; decoded->width = 1280; decoded->height = 720;
     decoded->color_range = AVCOL_RANGE_JPEG; decoded->colorspace = AVCOL_SPC_RGB;
@@ -133,6 +136,22 @@ void fakeProof() {
               "failed export leaked ownership");
     }
     fault = 0;
+    storageHeight = frames->height = 736;
+    check(createPlank2VaapiFrameLease(decoded, profile, 8, 900, lease, &operations) ==
+          PLANK_BACKEND_OPERATION_OK_V1 && lease.width == 1280 && lease.height == 720,
+          "padded allocation changed visible geometry or was rejected");
+    check(plank::platform::linux_backend::identity_dma_buf_attributes_v1(generic(lease), true, attributes) &&
+          attributes[1] == 1280 && attributes[3] == 720,
+          "EGL imported allocation padding as visible pixels");
+    lease = {};
+    storageHeight = frames->height = 704;
+    check(createPlank2VaapiFrameLease(decoded, profile, 8, 900, lease, &operations) !=
+          PLANK_BACKEND_OPERATION_OK_V1 && !lease.owner, "undersized storage accepted");
+    storageHeight = frames->height = 720;
+    decoded->crop_left = 1;
+    check(createPlank2VaapiFrameLease(decoded, profile, 8, 900, lease, &operations) !=
+          PLANK_BACKEND_OPERATION_OK_V1 && !lease.owner, "unhandled crop origin accepted");
+    decoded->crop_left = 0;
     frames->sw_format = AV_PIX_FMT_NV12;
     const auto previousExports = exports;
     check(createPlank2VaapiFrameLease(decoded, profile, 8, 900, lease, &operations) ==
@@ -252,7 +271,7 @@ void eglProof(const char* node, const PlankRetainedDecodedFrame& frame, const AV
     gbm_device_destroy(gbm); close(fd);
 }
 
-void hardwareProof(const char* node) {
+void hardwareProof(const char* node, const char* samplePath = nullptr) {
     AVBufferRef* device = nullptr;
     check(av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_VAAPI, node, nullptr, 0) == 0,
           "VA-API device unavailable");
@@ -263,7 +282,16 @@ void hardwareProof(const char* node) {
     decoder->get_format = hardwareFormat;
     decoder->thread_count = 1;
     check(avcodec_open2(decoder, codec, nullptr) == 0, "hardware decoder open failed");
-    const auto sample = plankFfmpegTestFrame(PlankFfmpegTestFrameKind::HevcRext10_444IdentityGbr);
+    auto sample = plankFfmpegTestFrame(PlankFfmpegTestFrameKind::HevcRext10_444IdentityGbr);
+    std::vector<unsigned char> sampleBytes;
+    if (samplePath) {
+        std::ifstream input(samplePath, std::ios::binary | std::ios::ate);
+        check(input && input.tellg() > 0 && input.tellg() <= 8 * 1024 * 1024, "invalid sample file size");
+        sampleBytes.resize(static_cast<size_t>(input.tellg()));
+        input.seekg(0);
+        check(bool(input.read(reinterpret_cast<char*>(sampleBytes.data()), sampleBytes.size())), "sample read failed");
+        sample.data = sampleBytes.data(); sample.size = int(sampleBytes.size());
+    }
     AVPacket* packet = av_packet_alloc();
     AVFrame* decoded = av_frame_alloc();
     check(packet && decoded && av_new_packet(packet, sample.size) == 0, "sample allocation failed");
@@ -277,6 +305,9 @@ void hardwareProof(const char* node) {
         received = result == 0;
     }
     check(received, "no hardware frame returned");
+    const auto* hwFrames = reinterpret_cast<const AVHWFramesContext*>(decoded->hw_frames_ctx->data);
+    std::cout << "hardware_frame visible=" << decoded->width << 'x' << decoded->height
+              << " storage=" << hwFrames->width << 'x' << hwFrames->height << '\n';
     PlankRetainedDecodedFrame lease;
     check(createPlank2VaapiFrameLease(decoded, profile, 1, 1000, lease) ==
           PLANK_BACKEND_OPERATION_OK_V1, "real hardware lease export failed");
@@ -320,6 +351,7 @@ void hardwareProof(const char* node) {
 int main(int argc, char** argv) {
     fakeProof();
     if (argc == 3 && std::strcmp(argv[1], "--hardware") == 0) hardwareProof(argv[2]);
+    else if (argc == 4 && std::strcmp(argv[1], "--hardware") == 0) hardwareProof(argv[2], argv[3]);
     else if (argc != 1) return 2;
     return 0;
 }

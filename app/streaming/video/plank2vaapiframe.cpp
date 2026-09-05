@@ -85,8 +85,14 @@ PlankBackendOperationResultV1 createPlank2VaapiFrameLease(
         return PLANK_BACKEND_OPERATION_FAILED_V1;
     }
     const auto& descriptor = owner->descriptor;
-    if (descriptor.width != static_cast<uint32_t>(decoded->width) ||
-            descriptor.height != static_cast<uint32_t>(decoded->height) ||
+    // The coded allocation can include right/bottom padding (2160 visible
+    // rows in a 2176-row HEVC surface). Import the visible rectangle with the
+    // original allocation pitch/modifier, never stretch padding into view.
+    if (frames->width < decoded->width || frames->height < decoded->height ||
+            frames->width > 32768 || frames->height > 32768 ||
+            decoded->crop_left != 0 || decoded->crop_top != 0 ||
+            descriptor.width != static_cast<uint32_t>(frames->width) ||
+            descriptor.height != static_cast<uint32_t>(frames->height) ||
             descriptor.num_objects == 0 || descriptor.num_objects > 4 ||
             descriptor.num_layers != 1 ||
             descriptor.layers[0].drm_format != UINT32_C(0x30313459) ||
@@ -99,7 +105,8 @@ PlankBackendOperationResultV1 createPlank2VaapiFrameLease(
         PLANK_MEDIA_FRAME_STAGE_DECODED_V1, profileId, PLANK_MEDIA_PIXEL_Y410_LE_V1,
         PLANK_MEDIA_MEMORY_DMA_BUF_V1,
         static_cast<uint16_t>(descriptor.layers[0].num_planes),
-        descriptor.width, descriptor.height, frameSequence, timestampNs,
+        static_cast<uint32_t>(decoded->width), static_cast<uint32_t>(decoded->height),
+        frameSequence, timestampNs,
         "vaapi-export-validation", 1U, {}, 0U,
     };
     for (uint32_t i = 0; i < descriptor.num_objects; ++i) {
