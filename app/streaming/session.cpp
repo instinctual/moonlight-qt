@@ -1169,7 +1169,8 @@ void Session::plankTransportVideoReceiveLoop()
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "PLANK A/V native clock: valid=%u offset_us=%lld delay_us=%lld "
                         "measured_us=%lld age_us=%llu success=%llu failed=%llu "
-                        "local_us=%llu local_valid=%d ticks_before=%llu ticks_after=%llu",
+                        "local_us=%llu local_valid=%d ticks_before=%llu ticks_after=%llu "
+                        "audio_queue_packets=%llu audio_queue_samples=%llu",
                         stats.clock.valid,
                         static_cast<long long>(stats.clock.offset_us),
                         static_cast<long long>(stats.clock.delay_us),
@@ -1180,7 +1181,9 @@ void Session::plankTransportVideoReceiveLoop()
                         static_cast<unsigned long long>(nativeNowUs),
                         clockResult == PLANK_TRANSPORT_OK,
                         static_cast<unsigned long long>(ticksBefore),
-                        static_cast<unsigned long long>(ticksAfter));
+                        static_cast<unsigned long long>(ticksAfter),
+                        static_cast<unsigned long long>(stats.audio_receive_queued_packets),
+                        static_cast<unsigned long long>(stats.audio_receive_queued_samples));
         }
 
         const std::uint64_t roundedRttMs =
