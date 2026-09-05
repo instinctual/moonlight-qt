@@ -11,7 +11,7 @@
 #include <QFont>
 #include <QCursor>
 #include <QDir>
-#include <QElapsedTimer>
+#include <QDateTime>
 #include <QTemporaryFile>
 #include <QThreadPool>
 #include <QRegularExpression>
@@ -62,7 +62,7 @@
 // Log to file or console dynamically for Windows builds
 #define LOG_TO_FILE
 #elif defined(Q_OS_LINUX)
-// Retain a private per-user log while preserving stderr for journald
+// Retain a private per-user log without duplicating routine output to journald
 #define LOG_TO_FILE
 #elif !defined(QT_DEBUG) && defined(Q_OS_DARWIN)
 // Log to file for release Mac builds
@@ -77,7 +77,6 @@
 // FIXME: Clean this up
 QAtomicInt g_AsyncLoggingEnabled;
 
-static QElapsedTimer s_LoggerTime;
 static QTextStream s_LoggerStream(stderr);
 static QThreadPool s_LoggerThread;
 static QMutex s_SyncLoggerMutex;
@@ -93,6 +92,12 @@ static QTextStream s_LoggerFileStream;
 #ifdef HAVE_DRM_MASTER_HOOKS
 extern "C" bool g_DisableDrmHooks;
 #endif
+
+static QString currentLogTimestamp()
+{
+    const QDateTime localTime = QDateTime::currentDateTime();
+    return localTime.toOffsetFromUtc(localTime.offsetFromUtc()).toString(Qt::ISODateWithMs);
+}
 
 class LoggerTask : public QRunnable
 {
@@ -154,7 +159,7 @@ void logToLoggerStream(QString& message)
     }
 #endif
 
-#if defined(Q_OS_LINUX) || !defined(LOG_TO_FILE)
+#if !defined(LOG_TO_FILE)
     s_LoggerStream << message;
     s_LoggerStream.flush();
 #elif defined(LOG_TO_FILE)
@@ -194,8 +199,7 @@ void sdlLogToDiskHandler(void*, int category, SDL_LogPriority priority, const ch
         break;
     }
 
-    QTime logTime = QTime::fromMSecsSinceStartOfDay(s_LoggerTime.elapsed());
-    QString txt = QString("%1 - SDL %2 (%3): %4\n").arg(logTime.toString()).arg(priorityTxt).arg(category).arg(message);
+    QString txt = QString("%1 - SDL %2 (%3): %4\n").arg(currentLogTimestamp()).arg(priorityTxt).arg(category).arg(message);
 
     logToLoggerStream(txt);
 }
@@ -222,8 +226,7 @@ void qtLogToDiskHandler(QtMsgType type, const QMessageLogContext&, const QString
         break;
     }
 
-    QTime logTime = QTime::fromMSecsSinceStartOfDay(s_LoggerTime.elapsed());
-    QString txt = QString("%1 - Qt %2: %3\n").arg(logTime.toString()).arg(typeTxt).arg(msg);
+    QString txt = QString("%1 - Qt %2: %3\n").arg(currentLogTimestamp()).arg(typeTxt).arg(msg);
 
     logToLoggerStream(txt);
 }
@@ -246,8 +249,7 @@ void ffmpegLogToDiskHandler(void* ptr, int level, const char* fmt, va_list vl)
     av_log_format_line(ptr, level, fmt, vl, lineBuffer, sizeof(lineBuffer), &printPrefix);
 
     if (shouldPrefixThisMessage) {
-        QTime logTime = QTime::fromMSecsSinceStartOfDay(s_LoggerTime.elapsed());
-        QString txt = QString("%1 - FFmpeg: %2").arg(logTime.toString()).arg(lineBuffer);
+        QString txt = QString("%1 - FFmpeg: %2").arg(currentLogTimestamp()).arg(lineBuffer);
         logToLoggerStream(txt);
     }
     else {
@@ -469,7 +471,6 @@ int main(int argc, char *argv[])
         const bool opened = s_LoggerFile->open(QIODevice::WriteOnly | QIODevice::Text);
 #endif
         if (opened) {
-            QTextStream(stderr) << "Redirecting log output to " << s_LoggerFile->fileName() << Qt::endl;
             s_LoggerFileStream.setDevice(s_LoggerFile);
         }
     }
@@ -477,8 +478,6 @@ int main(int argc, char *argv[])
 
     // Serialize log messages on a single thread
     s_LoggerThread.setMaxThreadCount(1);
-    s_LoggerTime.start();
-
     // Register our logger with all libraries
     SDL_SetLogOutputFunction(sdlLogToDiskHandler, nullptr);
     qInstallMessageHandler(qtLogToDiskHandler);
