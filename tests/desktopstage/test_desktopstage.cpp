@@ -6,6 +6,16 @@ class TestDesktopStage : public QObject
 {
     Q_OBJECT
 private slots:
+    void stopsTerminalReconnectFailures()
+    {
+        for (int status : {400, 403, 404, 426}) {
+            QVERIFY(PlankHostRecovery::terminalReconnectResponse(status));
+        }
+        for (int status : {401, 409, 423, 425, 429, 500, 502, 503, 504}) {
+            QVERIFY(!PlankHostRecovery::terminalReconnectResponse(status));
+        }
+    }
+
     void boundsSilenceTrigger()
     {
         using namespace PlankHostRecovery;

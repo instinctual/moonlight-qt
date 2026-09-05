@@ -3010,6 +3010,7 @@ bool Session::runPlankReconnect()
     }
 
     for (int attempt = 1; !m_ReconnectCancelled.load(); ++attempt) {
+        bool terminalFailure = false;
         try {
             {
                 QWriteLocker lock(&m_Computer->lock);
@@ -3064,8 +3065,12 @@ bool Session::runPlankReconnect()
                 return true;
             }
         } catch (const GfeHttpResponseException& error) {
-            qWarning() << "PLANK reauthentication attempt" << attempt
+            qWarning() << "PLANK reconnect attempt" << attempt
                        << "failed:" << error.toQString();
+            terminalFailure = PlankHostRecovery::terminalReconnectResponse(error.getStatusCode());
+            if (terminalFailure && !m_ReconnectCancelled.load()) {
+                emit displayLaunchError(tr("Unable to reconnect: %1").arg(error.toQString()));
+            }
         } catch (const QtNetworkReplyException& error) {
             qWarning() << "PLANK reconnect attempt" << attempt
                        << "could not reach the host:" << error.toQString();
@@ -3081,6 +3086,9 @@ bool Session::runPlankReconnect()
             m_Computer->sessionToken.fill(QChar('\0'));
             m_Computer->sessionToken.clear();
             m_Computer->authorizationState = NvComputer::AS_UNAUTHORIZED;
+        }
+        if (terminalFailure) {
+            break;
         }
         if (!m_ReconnectCancelled.load()) {
             constexpr int RetryDelayMs = 1000;
