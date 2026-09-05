@@ -6,6 +6,7 @@
 
 extern "C" {
 #include <libavutil/pixfmt.h>
+#include <libavutil/hwcontext_drm.h>
 }
 
 #include <array>
@@ -14,6 +15,76 @@ extern "C" {
 #include <limits>
 
 namespace {
+  Plank2AvFramePtr dma_buf_view(const PlankRetainedPresentationFrame& retained) {
+    PlankMediaFrameLeaseV1 lease {
+      sizeof(PlankMediaFrameLeaseV1), PLANK_MEDIA_INTERFACE_VERSION,
+      PLANK_MEDIA_FRAME_STAGE_DECODED_V1, retained.profileId,
+      retained.pixelLayout, retained.memoryKind, retained.planeCount,
+      retained.width, retained.height, retained.frameSequence,
+      retained.frameTimestampNs, retained.topologyGeneration.c_str(),
+      retained.frameLeaseId, {}, 0U,
+    };
+    if (retained.pixelLayout != PLANK_MEDIA_PIXEL_Y410_LE_V1 ||
+        retained.planeCount > PLANK_MEDIA_MAX_PLANES_V1 ||
+        retained.frameSequence == 0U || retained.frameTimestampNs == 0U ||
+        retained.frameTimestampNs > static_cast<std::uint64_t>(INT64_MAX)) {
+      return {};
+    }
+    for (std::uint16_t i = 0; i < retained.planeCount; ++i) {
+      lease.planes[i] = retained.planes[i];
+    }
+    if (plank_media_frame_lease_validate_v1(&lease) != PLANK_MEDIA_INTERFACE_OK_V1) {
+      return {};
+    }
+    Plank2AvFramePtr frame(av_frame_alloc());
+    if (!frame) return {};
+    frame->buf[0] = av_buffer_allocz(sizeof(AVDRMFrameDescriptor));
+    if (!frame->buf[0]) return {};
+    frame->data[0] = frame->buf[0]->data;
+    auto* descriptor = reinterpret_cast<AVDRMFrameDescriptor*>(frame->data[0]);
+    descriptor->nb_layers = 1;
+    auto& layer = descriptor->layers[0];
+    // Preserve storage identity. Y410 -> XR30 interpretation belongs to the
+    // qualified EGL backend, not this ownership/descriptor adapter.
+    layer.format = static_cast<std::uint32_t>('Y') |
+                   (static_cast<std::uint32_t>('4') << 8) |
+                   (static_cast<std::uint32_t>('1') << 16) |
+                   (static_cast<std::uint32_t>('0') << 24);
+    layer.nb_planes = retained.planeCount;
+    for (std::uint16_t i = 0; i < retained.planeCount; ++i) {
+      const auto& plane = retained.planes[i];
+      if (plane.size_bytes > std::numeric_limits<std::size_t>::max() ||
+          plane.stride_bytes > INT_MAX || plane.offset_bytes > INT_MAX) return {};
+      int object_index = 0;
+      while (object_index < descriptor->nb_objects &&
+             descriptor->objects[object_index].fd != plane.dma_buf_fd) ++object_index;
+      if (object_index == descriptor->nb_objects) {
+        auto& object = descriptor->objects[descriptor->nb_objects++];
+        object.fd = plane.dma_buf_fd;
+        object.size = plane.size_bytes;
+        object.format_modifier = plane.modifier;
+      } else if (descriptor->objects[object_index].size != plane.size_bytes ||
+                 descriptor->objects[object_index].format_modifier != plane.modifier) {
+        return {};
+      }
+      layer.planes[i].object_index = object_index;
+      layer.planes[i].offset = plane.offset_bytes;
+      layer.planes[i].pitch = plane.stride_bytes;
+    }
+    frame->format = AV_PIX_FMT_DRM_PRIME;
+    frame->width = retained.width;
+    frame->height = retained.height;
+    frame->pts = retained.frameTimestampNs;
+    frame->time_base = {1, 1000000000};
+    frame->sample_aspect_ratio = {1, 1};
+    frame->color_range = AVCOL_RANGE_JPEG;
+    frame->color_primaries = AVCOL_PRI_BT709;
+    frame->color_trc = AVCOL_TRC_IEC61966_2_1;
+    frame->colorspace = AVCOL_SPC_RGB;
+    frame->chroma_location = AVCHROMA_LOC_UNSPECIFIED;
+    return frame;
+  }
+
   struct layout_spec_t {
     AVPixelFormat format;
     std::uint8_t bytes_per_sample;
@@ -73,6 +144,9 @@ void Plank2AvFrameDeleter::operator()(AVFrame* frame) const noexcept
 Plank2AvFramePtr createPlank2PresentationAvFrame(
         const PlankRetainedPresentationFrame& retained) noexcept
 {
+    if (retained.memoryKind == PLANK_MEDIA_MEMORY_DMA_BUF_V1) {
+        return dma_buf_view(retained);
+    }
     layout_spec_t spec {};
     if (retained.memoryKind != PLANK_MEDIA_MEMORY_CPU_V1 ||
             retained.planeCount != 3U || retained.width == 0U ||

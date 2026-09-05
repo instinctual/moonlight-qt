@@ -11,6 +11,12 @@
 #include <limits>
 #include <string_view>
 #include <vector>
+#include <fcntl.h>
+#include <unistd.h>
+
+extern "C" {
+#include <libavutil/hwcontext_drm.h>
+}
 
 namespace {
   [[noreturn]] void fail(std::string_view detail) {
@@ -145,6 +151,79 @@ int main()
             static_cast<std::uint64_t>(INT64_MAX) + 1U;
     require(!createPlank2PresentationAvFrame(invalid.frame),
             "an unrepresentable timestamp was accepted");
+
+    // Descriptor-only proof: these fds are not GPU buffers. No GPU capability
+    // or successful import is claimed by this ownership/metadata test.
+    const int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    const int secondFd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    require(fd >= 0 && secondFd >= 0, "test fd creation failed");
+    retained_fixture_t dma(tuples[6]);
+    dma.frame.memoryKind = PLANK_MEDIA_MEMORY_DMA_BUF_V1;
+    dma.frame.pixelLayout = PLANK_MEDIA_PIXEL_Y410_LE_V1;
+    dma.frame.width = 3840U;
+    dma.frame.height = 2160U;
+    for (std::uint16_t count = 1U; count <= 4U; ++count) {
+        dma.frame.planeCount = count;
+        for (std::uint16_t i = 0; i < count; ++i) {
+            dma.frame.planes[i] = {0U, fd, i * 4096U, 15360U,
+                                  64U * 1024U * 1024U,
+                                  UINT64_C(0x0100000000000008)};
+        }
+        auto frame = createPlank2PresentationAvFrame(dma.frame);
+        require(frame && frame->format == AV_PIX_FMT_DRM_PRIME &&
+                    frame->colorspace == AVCOL_SPC_RGB &&
+                    frame->color_range == AVCOL_RANGE_JPEG,
+                "DMA-BUF view lost exact format/color");
+        const auto* descriptor = reinterpret_cast<const AVDRMFrameDescriptor*>(
+                    frame->data[0]);
+        require(descriptor->nb_objects == 1 && descriptor->nb_layers == 1 &&
+                    descriptor->layers[0].nb_planes == count &&
+                    descriptor->layers[0].format == UINT32_C(0x30313459),
+                "packed storage planes or object sharing changed");
+        require(descriptor->objects[0].fd == fd &&
+                    descriptor->objects[0].size == dma.frame.planes[0].size_bytes &&
+                    descriptor->objects[0].format_modifier ==
+                        dma.frame.planes[0].modifier,
+                "DMA-BUF object metadata changed");
+        for (std::uint16_t i = 0; i < count; ++i) {
+            require(descriptor->layers[0].planes[i].object_index == 0 &&
+                        descriptor->layers[0].planes[i].offset == i * 4096U &&
+                        descriptor->layers[0].planes[i].pitch == 15360,
+                    "auxiliary plane metadata changed");
+        }
+        frame.reset();
+        require(fcntl(fd, F_GETFD) >= 0, "view closed the producer's fd");
+    }
+    dma.frame.planes[1].dma_buf_fd = secondFd;
+    auto separate = createPlank2PresentationAvFrame(dma.frame);
+    require(separate != nullptr, "separate object rejected");
+    const auto* descriptor = reinterpret_cast<const AVDRMFrameDescriptor*>(
+                separate->data[0]);
+    require(descriptor->nb_objects == 2 &&
+                descriptor->layers[0].planes[1].object_index == 1 &&
+                descriptor->layers[0].planes[2].object_index == 0,
+            "separate object index was not preserved");
+    separate.reset();
+    dma.frame.planes[1].dma_buf_fd = fd;
+    dma.frame.planes[1].size_bytes--;
+    require(!createPlank2PresentationAvFrame(dma.frame),
+            "inconsistent metadata for a shared fd was accepted");
+    dma.frame.planes[1].size_bytes++;
+    dma.frame.planes[1].offset_bytes = dma.frame.planes[1].size_bytes;
+    require(!createPlank2PresentationAvFrame(dma.frame),
+            "out-of-bounds DMA-BUF offset was accepted");
+    dma.frame.planes[1].offset_bytes = 4096U;
+    dma.frame.profileId = tuples[5].profile;
+    require(!createPlank2PresentationAvFrame(dma.frame),
+            "eight-bit profile accepted a ten-bit identity DMA-BUF");
+    dma.frame.profileId = tuples[6].profile;
+    dma.frame.planeCount = 5U;
+    require(!createPlank2PresentationAvFrame(dma.frame),
+            "oversized plane array was accepted");
+    require(fcntl(fd, F_GETFD) >= 0 && fcntl(secondFd, F_GETFD) >= 0,
+            "error path closed a producer fd");
+    close(fd);
+    close(secondFd);
 
     std::cout << "plank2_presentation_frame_test=pass\n";
     return EXIT_SUCCESS;
