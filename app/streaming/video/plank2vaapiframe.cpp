@@ -2,6 +2,7 @@
 #include "streaming/video/plank2vaapiframe.h"
 
 extern "C" {
+#include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/pixdesc.h>
 }
