@@ -237,7 +237,11 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
             backlogAudioMs,
             now);
         if (correction.updated || backlogCorrection.updated) {
-            constexpr int CompensationSeconds = 1;
+            // This is the numerical ratio interval, not buffered audio. At
+            // 48 kHz, one second rounds corrections in ~20.8 ppm steps;
+            // sixty seconds resolves sub-ppm corrections. Refreshing the
+            // ratio does not reset the filter or delay submitting this block.
+            constexpr int CompensationSeconds = 60;
             const int compensationDistance = m_SampleRate * CompensationSeconds;
             const int appliedCorrectionPpm =
                 correction.correctionPpm + backlogCorrection.correctionPpm;
