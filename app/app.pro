@@ -357,6 +357,10 @@ libva {
     DEFINES += HAVE_LIBVA
     SOURCES += streaming/video/ffmpeg-renderers/vaapi.cpp
     HEADERS += streaming/video/ffmpeg-renderers/vaapi.h
+    contains(DEFINES, PLANK2_RETAINED_CLIENT_ADAPTERS=1) {
+        SOURCES += streaming/video/plank2vaapiframe.cpp
+        HEADERS += streaming/video/plank2vaapiframe.h
+    }
 }
 libva-x11 {
     message(VAAPI X11 support enabled)
