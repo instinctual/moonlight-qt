@@ -458,6 +458,10 @@ config_EGL {
     HEADERS += \
         streaming/video/ffmpeg-renderers/eglvid.h \
         streaming/video/ffmpeg-renderers/eglimagefactory.h
+    contains(DEFINES, PLANK2_RETAINED_CLIENT_ADAPTERS=1) {
+        SOURCES += $$PLANK2_ROOT/platform/linux/presentation/src/egl_dma_buf_image_v1.cpp
+        HEADERS += $$PLANK2_ROOT/platform/linux/presentation/include/plank/platform/linux/egl_dma_buf_image_v1.hpp
+    }
 }
 config_SL {
     message(Steam Link build configuration selected)

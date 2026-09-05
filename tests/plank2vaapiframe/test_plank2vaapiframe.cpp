@@ -3,6 +3,10 @@
 #include "streaming/video/plank2presentationframe.h"
 #include "streaming/video/ffmpegtestframes.h"
 #include "plank/media/profile_v1.h"
+#include "plank/platform/linux/egl_dma_buf_image_v1.hpp"
+#include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
+#include <gbm.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -14,6 +18,8 @@ extern "C" {
 #include <iostream>
 #include <fcntl.h>
 #include <unistd.h>
+#include <vector>
+#include <algorithm>
 
 namespace {
 void check(bool ok, const char* detail) {
@@ -68,6 +74,17 @@ PlankRetainedPresentationFrame presentation(const PlankRetainedDecodedFrame& dec
     return result;
 }
 
+PlankMediaFrameLeaseV1 generic(const PlankRetainedDecodedFrame& frame) {
+    PlankMediaFrameLeaseV1 result {
+        sizeof(PlankMediaFrameLeaseV1), PLANK_MEDIA_INTERFACE_VERSION,
+        PLANK_MEDIA_FRAME_STAGE_DECODED_V1, frame.profileId, frame.pixelLayout,
+        frame.memoryKind, frame.planeCount, frame.width, frame.height,
+        frame.frameSequence, frame.monotonicTimestampNs, "vaapi-proof", 1, {}, 0,
+    };
+    for (uint16_t i = 0; i < frame.planeCount; ++i) result.planes[i] = frame.planes[i];
+    return result;
+}
+
 void fakeProof() {
     originalFd = open("/dev/null", O_RDONLY | O_CLOEXEC);
     check(originalFd >= 0, "test fd open failed");
@@ -96,6 +113,13 @@ void fakeProof() {
           "decode surface not retained or export not synchronized");
     auto view = createPlank2PresentationAvFrame(presentation(lease));
     check(view && view->format == AV_PIX_FMT_DRM_PRIME, "composed descriptor conversion failed");
+    std::vector<EGLint> attributes;
+    check(plank::platform::linux_backend::identity_dma_buf_attributes_v1(generic(lease), true, attributes),
+          "EGL auxiliary plane attributes failed");
+    check(attributes.size() == 39 && attributes[5] == EGLint{0x30335258} &&
+          attributes.back() == EGL_NONE, "EGL import shape/identity changed");
+    check(!plank::platform::linux_backend::identity_dma_buf_attributes_v1(generic(lease), false, attributes) &&
+          attributes.empty(), "tiled frame accepted without modifier support");
     view.reset();
     check(fcntl(exportedFd, F_GETFD) >= 0, "presentation view closed export");
     lease = {};
@@ -134,6 +158,77 @@ AVPixelFormat hardwareFormat(AVCodecContext*, const AVPixelFormat* formats) {
         if (*formats == AV_PIX_FMT_VAAPI) return *formats;
     }
     return AV_PIX_FMT_NONE; // No software substitution in a hardware proof.
+}
+
+GLuint compileShader(GLenum kind, const char* text) {
+    const GLuint shader = glCreateShader(kind);
+    glShaderSource(shader, 1, &text, nullptr);
+    glCompileShader(shader);
+    GLint ok = 0; glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    check(ok, "probe shader compilation failed");
+    return shader;
+}
+
+void eglProof(const char* node, const PlankRetainedDecodedFrame& frame) {
+    const int fd = open(node, O_RDWR | O_CLOEXEC);
+    check(fd >= 0, "EGL render node unavailable");
+    auto* gbm = gbm_create_device(fd);
+    check(gbm, "GBM device unavailable");
+    const EGLDisplay display = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, gbm, nullptr);
+    check(display != EGL_NO_DISPLAY && eglInitialize(display, nullptr, nullptr), "EGL initialization failed");
+    check(eglBindAPI(EGL_OPENGL_ES_API), "GLES API unavailable");
+    const EGLint contextAttributes[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    const EGLContext context = eglCreateContext(display, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, contextAttributes);
+    check(context != EGL_NO_CONTEXT && eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, context),
+          "surfaceless EGL context unavailable");
+    const auto destroy = reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(eglGetProcAddress("eglDestroyImageKHR"));
+    const auto bindImage = reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
+    check(destroy && bindImage, "EGL image entrypoints unavailable");
+    const EGLImageKHR image = plank::platform::linux_backend::import_identity_dma_buf_image_v1(display, generic(frame));
+    check(image != EGL_NO_IMAGE_KHR, "real leased surface EGL import failed");
+    GLuint input = 0; glGenTextures(1, &input);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, input);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    bindImage(GL_TEXTURE_EXTERNAL_OES, image);
+    GLuint output = 0; glGenTextures(1, &output); glBindTexture(GL_TEXTURE_2D, output);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGB10_A2, frame.width, frame.height);
+    GLuint framebuffer = 0; glGenFramebuffers(1, &framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, output, 0);
+    check(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE, "ten-bit FBO incomplete");
+    const GLuint vertex = compileShader(GL_VERTEX_SHADER,
+        "#version 300 es\nprecision highp float; out vec2 uv; void main(){"
+        "vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);uv=p;gl_Position=vec4(p*2.0-1.0,0,1);}");
+    const GLuint fragment = compileShader(GL_FRAGMENT_SHADER,
+        "#version 300 es\n#extension GL_OES_EGL_image_external_essl3 : require\n"
+        "precision highp float; uniform highp samplerExternalOES tex; in vec2 uv; out vec4 color;"
+        "void main(){color=texture(tex,uv);}");
+    const GLuint program = glCreateProgram(); glAttachShader(program, vertex); glAttachShader(program, fragment);
+    glLinkProgram(program); GLint linked = 0; glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    check(linked, "probe shader link failed");
+    glUseProgram(program); glUniform1i(glGetUniformLocation(program, "tex"), 0);
+    glViewport(0, 0, frame.width, frame.height); glDisable(GL_DITHER);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glFinish(); // Explicit producer-lease release boundary, not scanout timing.
+    std::vector<uint32_t> pixels(size_t(frame.width) * frame.height);
+    glReadPixels(0, 0, frame.width, frame.height, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, pixels.data());
+    check(glGetError() == GL_NO_ERROR, "GPU image sampling/readback failed");
+    unsigned minCode = 1023, maxCode = 0;
+    for (auto pixel : pixels) {
+        minCode = std::min(minCode, (pixel >> 10) & 1023U);
+        maxCode = std::max(maxCode, (pixel >> 10) & 1023U);
+    }
+    check(maxCode > minCode, "hardware sample unexpectedly uniform");
+    std::cout << "egl_hardware_lease_sampling=pass green_min=" << minCode << " green_max=" << maxCode << '\n';
+    glDeleteProgram(program); glDeleteShader(vertex); glDeleteShader(fragment);
+    glDeleteFramebuffers(1, &framebuffer); glDeleteTextures(1, &output); glDeleteTextures(1, &input);
+    check(destroy(display, image), "EGL image destruction failed");
+    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroyContext(display, context); eglTerminate(display);
+    gbm_device_destroy(gbm); close(fd);
 }
 
 void hardwareProof(const char* node) {
@@ -178,6 +273,7 @@ void hardwareProof(const char* node) {
         std::cout << "object=" << i << " modifier=" << std::hex
                   << descriptor->objects[i].format_modifier << std::dec << '\n';
     }
+    eglProof(node, lease);
     view.reset();
     lease = {};
 }
