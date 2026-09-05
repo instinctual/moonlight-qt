@@ -246,6 +246,7 @@ SOURCES += \
     backend/nvcomputer.cpp \
     backend/nvhttp.cpp \
     backend/computermanager.cpp \
+    backend/relaywakeclient.cpp \
     cli/commandlineparser.cpp \
     cli/startstream.cpp \
     settings/plankclientpolicy.cpp \
@@ -282,6 +283,7 @@ HEADERS += \
     backend/planknetwork.h \
     backend/nvhttp.h \
     backend/computermanager.h \
+    backend/relaywakeclient.h \
     cli/commandlineparser.h \
     cli/startstream.h \
     settings/streamingpreferences.h \
