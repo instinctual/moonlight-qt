@@ -399,6 +399,11 @@ void Pacer::renderFrame(AVFrame* frame)
         m_QueueLatencyHistogram.size() - 1)]++;
     m_MaxQueueLatencyMs = std::max(m_MaxQueueLatencyMs, queueLatencyMs);
 
+    // EGL retains the image with av_frame_move_ref(), which also clears the
+    // caller's frame metadata. Preserve timing before transferring ownership;
+    // publish it only after the renderer has completed its call.
+    const int64_t presentationTimeMs = frame->pts;
+
     // Render it
     m_VsyncRenderer->renderFrame(frame);
     Uint32 afterRender = SDL_GetTicks();
@@ -411,15 +416,15 @@ void Pacer::renderFrame(AVFrame* frame)
     m_MaxRendererCallLatencyMs = std::max(m_MaxRendererCallLatencyMs, rendererCallLatencyMs);
     m_VideoStats->renderedFrames++;
 
-    if (frame->pts >= 0) {
-        PlankAvSync::publishVideoClock(frame->pts, afterRender);
+    if (presentationTimeMs >= 0) {
+        PlankAvSync::publishVideoClock(presentationTimeMs, afterRender);
     }
 
-    if (m_AvSyncTelemetryEnabled && frame->pts >= 0 &&
+    if (m_AvSyncTelemetryEnabled && presentationTimeMs >= 0 &&
             (m_LastVideoTelemetryTime == 0 || afterRender - m_LastVideoTelemetryTime >= 1000)) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                     "PLANK A/V video clock: media=%lld render=%u queue=%u renderer=%u",
-                    static_cast<long long>(frame->pts),
+                    static_cast<long long>(presentationTimeMs),
                     afterRender,
                     queueLatencyMs,
                     rendererCallLatencyMs);
@@ -494,7 +499,7 @@ void Pacer::recordFrameDrop(DropReason reason, AVFrame* frame, int queueDepth, i
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "Client pacer dropped frame: reason=%s age=%u ms queue=%d target=%d total=%u",
                 reasonName,
-                SDL_GetTicks() - (Uint32)frame->pkt_dts,
+                static_cast<Uint32>(SDL_GetTicks()) - static_cast<Uint32>(frame->pkt_dts),
                 queueDepth,
                 targetDepth,
                 m_VideoStats->pacerDroppedFrames);
