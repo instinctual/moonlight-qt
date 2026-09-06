@@ -96,6 +96,12 @@ void SDLCALL SdlAudioRenderer::pullAudio(void* opaque, SDL_AudioStream* stream,
                                          int additionalBytes, int)
 {
     auto& self = *static_cast<SdlAudioRenderer*>(opaque);
+    if (self.m_Telemetry && additionalBytes > 0) {
+        const Uint64 now = SDL_GetTicksNS();
+        if (self.m_LastPullNs) self.m_MaxPullGapNs = std::max(self.m_MaxPullGapNs, now - self.m_LastPullNs);
+        self.m_LastPullNs = now;
+        self.m_MaxPullFrames = std::max(self.m_MaxPullFrames, additionalBytes / FrameBytes);
+    }
     // SDL holds its recursive stream lock for the callback. Producer and
     // telemetry use this SAME lock; no extra worker, queue or outer mutex.
     std::array<float, 4096 * Channels> output{};
@@ -116,6 +122,11 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
             bytesWritten < 0 || bytesWritten % FrameBytes != 0 ||
             static_cast<size_t>(bytesWritten) > m_AudioBuffer.size() * sizeof(float)) return false;
     if (!SDL_LockAudioStream(m_AudioStream)) return false;
+    if (m_Telemetry && bytesWritten) {
+        const Uint64 now = SDL_GetTicksNS();
+        if (m_LastPushNs) m_MaxPushGapNs = std::max(m_MaxPushGapNs, now - m_LastPushNs);
+        m_LastPushNs = now;
+    }
     bool okay = !m_Failed;
     if (okay && bytesWritten) {
         okay = plank_audio_push(m_Regulator, reinterpret_cast<const uint8_t*>(m_AudioBuffer.data()),
@@ -127,23 +138,32 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
     bool report = false;
     int64_t filterDelay = 0;
     int queuedBytes = 0;
+    Uint64 pushGapNs = 0, pullGapNs = 0;
+    int pullFrames = 0;
     if (okay && m_Telemetry && (!m_LastTelemetryTime || now - m_LastTelemetryTime >= 1000)) {
         report = plank_audio_stats(m_Regulator, &stats);
         filterDelay = plank_audio_swr_delay(m_Filter);
         queuedBytes = SDL_GetAudioStreamQueued(m_AudioStream);
+        pushGapNs = m_MaxPushGapNs;
+        pullGapNs = m_MaxPullGapNs;
+        pullFrames = m_MaxPullFrames;
+        m_MaxPushGapNs = m_MaxPullGapNs = 0;
+        m_MaxPullFrames = 0;
         m_LastTelemetryTime = now;
     }
     SDL_UnlockAudioStream(m_AudioStream);
     // Logging can block on disk; never keep the device callback waiting for it.
     if (report) {
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "PLANK native audio regulator: ticks=%llu queued_frames=%u correction_ppm=%d input_frames=%llu pulled_frames=%llu underflow_frames=%llu skipped_frames=%llu filter_delay_frames=%lld sdl_queued_bytes=%d",
+                "PLANK native audio regulator: ticks=%llu queued_frames=%u correction_ppm=%d input_frames=%llu pulled_frames=%llu underflow_frames=%llu skipped_frames=%llu filter_delay_frames=%lld sdl_queued_bytes=%d push_gap_us=%llu pull_gap_us=%llu pull_max_frames=%d",
                 static_cast<unsigned long long>(now), stats.queued_frames, stats.correction_ppm,
                 static_cast<unsigned long long>(stats.input_frames),
                 static_cast<unsigned long long>(stats.pulled_frames),
                 static_cast<unsigned long long>(stats.underflow_frames),
                 static_cast<unsigned long long>(stats.skipped_frames),
-                static_cast<long long>(filterDelay), queuedBytes);
+                static_cast<long long>(filterDelay), queuedBytes,
+                static_cast<unsigned long long>(pushGapNs / 1000),
+                static_cast<unsigned long long>(pullGapNs / 1000), pullFrames);
     }
     return okay;
 }

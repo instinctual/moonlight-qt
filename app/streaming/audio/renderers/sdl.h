@@ -30,4 +30,9 @@ private:
     bool m_Failed = false; // SDL stream lock once callbacks start.
     bool m_Telemetry = false;
     Uint64 m_LastTelemetryTime = 0;
+    Uint64 m_LastPushNs = 0;
+    Uint64 m_LastPullNs = 0;
+    Uint64 m_MaxPushGapNs = 0;
+    Uint64 m_MaxPullGapNs = 0;
+    int m_MaxPullFrames = 0;
 };
