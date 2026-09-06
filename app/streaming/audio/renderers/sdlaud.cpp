@@ -1,351 +1,166 @@
 #include "sdl.h"
+#include <plank_audio_resampler.h>
+#include <algorithm>
+#include <array>
 
-#include <Limelight.h>
-#include <cmath>
-
-#if defined(HAVE_FFMPEG) && defined(Q_OS_LINUX)
-extern "C" {
-#include <libavutil/channel_layout.h>
-#include <libavutil/opt.h>
-#include <libavutil/samplefmt.h>
-#include <libswresample/swresample.h>
+namespace {
+constexpr int SampleRate = 48000;
+constexpr int Channels = 2;
+constexpr int FrameBytes = Channels * sizeof(float);
+bool compensate(void* context, int32_t delta, uint32_t distance)
+{
+    return plank_audio_swr_set(context, delta, static_cast<int>(distance)) >= 0;
 }
-#endif
+int32_t filter(void* context, uint8_t* output, uint32_t capacity,
+               const uint8_t* input, uint32_t count)
+{
+    return plank_audio_swr_filter(context, output, static_cast<int>(capacity),
+                                  input, static_cast<int>(count));
+}
+}
 
-SdlAudioRenderer::SdlAudioRenderer(bool enableAvSyncCorrection)
-    : m_AudioStream(nullptr),
-      m_AudioBuffer(nullptr),
-      m_FrameSize(0),
-      m_FrameDurationMs(0),
-      m_BytesPerSampleFrame(0),
-      m_BytesPerSecond(0),
-      m_DeviceBufferDurationMs(0),
-      m_SampleRate(0),
-      m_ChannelCount(0),
-      m_EnableAvSyncCorrection(enableAvSyncCorrection),
-      m_RawAudioFrames(0),
-      m_SubmittedAudioFrames(0),
-      m_LastSubmittedAudioMediaTimeMs(-1),
-      m_SkippedAudioBlocks(0)
-#if defined(HAVE_FFMPEG) && defined(Q_OS_LINUX)
-      , m_SwrContext(nullptr)
-#endif
+SdlAudioRenderer::SdlAudioRenderer(bool telemetry) : m_Telemetry(telemetry)
 {
     SDL_assert(!SDL_WasInit(SDL_INIT_AUDIO));
-
-#ifdef Q_OS_LINUX
-    // The qualified PLANK Linux client talks to PipeWire directly.
     SDL_SetHintWithPriority(SDL_HINT_AUDIO_DRIVER, "pipewire", SDL_HINT_OVERRIDE);
-#endif
-
-    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "SDL_InitSubSystem(SDL_INIT_AUDIO) failed: %s",
-                     SDL_GetError());
-        SDL_assert(SDL_WasInit(SDL_INIT_AUDIO));
+    m_Initialized = SDL_InitSubSystem(SDL_INIT_AUDIO);
+    if (!m_Initialized) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Audio initialization failed: %s", SDL_GetError());
     }
 }
 
-bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* opusConfig)
+bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* config)
 {
-    SDL_AudioSpec want = {};
-
-    want.freq = opusConfig->sampleRate;
-    want.format = SDL_AUDIO_F32;
-    want.channels = opusConfig->channelCount;
-
-    m_FrameDurationMs = opusConfig->samplesPerFrame / (opusConfig->sampleRate / 1000);
-    m_FrameSize = opusConfig->samplesPerFrame *
-                  opusConfig->channelCount *
-                  getAudioBufferSampleSize();
-
+    if (!m_Initialized || config->sampleRate != SampleRate ||
+            config->channelCount != Channels || config->samplesPerFrame <= 0 ||
+            config->samplesPerFrame > 4096) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Native audio requires 48 kHz stereo float PCM");
+        return false;
+    }
+    m_Filter = plank_audio_swr_new();
+    if (!m_Filter) return false;
+    const PlankAudioCompensator callbacks{m_Filter, compensate, filter};
+    m_Regulator = plank_audio_new(SampleRate, Channels, &callbacks);
+    if (!m_Regulator) return false;
+    m_AudioBuffer.resize(config->samplesPerFrame * Channels);
+    const SDL_AudioSpec want{SDL_AUDIO_F32, Channels, SampleRate};
     m_AudioStream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
-                                              &want, nullptr, nullptr);
-    if (m_AudioStream == nullptr) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "Failed to open audio device: %s",
-                     SDL_GetError());
+                                              &want, pullAudio, this);
+    if (!m_AudioStream) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Audio device open failed: %s", SDL_GetError());
         return false;
     }
-
-    SDL_AudioSpec deviceSpec = {};
-    int deviceSampleFrames = 0;
-    const SDL_AudioDeviceID device = SDL_GetAudioStreamDevice(m_AudioStream);
-    if (!SDL_GetAudioDeviceFormat(device, &deviceSpec, &deviceSampleFrames)) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "Failed to query audio device format: %s", SDL_GetError());
-        return false;
-    }
-
-    // SDL3's device stream converts from this source format to the physical
-    // device format. Queue accounting remains in source-format bytes.
-    m_BytesPerSecond = want.freq * want.channels * getAudioBufferSampleSize();
-    m_BytesPerSampleFrame = want.channels * getAudioBufferSampleSize();
-    m_DeviceBufferDurationMs = deviceSampleFrames * 1000 / deviceSpec.freq;
-    m_SampleRate = want.freq;
-    m_ChannelCount = want.channels;
-
-#if defined(HAVE_FFMPEG) && defined(Q_OS_LINUX)
-    if (m_EnableAvSyncCorrection) {
-        AVChannelLayout channelLayout;
-        av_channel_layout_default(&channelLayout, want.channels);
-        const int allocationResult = swr_alloc_set_opts2(
-            &m_SwrContext,
-            &channelLayout,
-            AV_SAMPLE_FMT_FLT,
-            want.freq,
-            &channelLayout,
-            AV_SAMPLE_FMT_FLT,
-            opusConfig->sampleRate,
-            0,
-            nullptr);
-        if (m_SwrContext != nullptr) {
-            // Keep the resampler active from the first block. Otherwise the
-            // first compensation request would reinitialize it mid-stream.
-            av_opt_set_int(m_SwrContext, "flags", SWR_FLAG_RESAMPLE, 0);
-        }
-        av_channel_layout_uninit(&channelLayout);
-        if (allocationResult < 0 || m_SwrContext == nullptr ||
-                swr_init(m_SwrContext) < 0) {
-            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                        "Unable to initialize PLANK A/V audio correction");
-            swr_free(&m_SwrContext);
-            m_EnableAvSyncCorrection = false;
-        }
-        else {
-            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                        "PLANK video-master audio correction enabled (limit %d ppm)",
-                        PlankAvSync::AudioRateController::MaximumCorrectionPpm);
-        }
-    }
-#else
-    m_EnableAvSyncCorrection = false;
-#endif
-
-    m_AudioBuffer = SDL_malloc(m_FrameSize);
-    if (m_AudioBuffer == nullptr) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "Failed to allocate audio buffer");
-        return false;
-    }
-
+    SDL_AudioSpec deviceSpec{};
+    int frames = 0;
+    if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(m_AudioStream), &deviceSpec, &frames) ||
+            deviceSpec.freq <= 0) return false;
+    m_DeviceBufferDurationMs = frames * 1000 / deviceSpec.freq;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "Decoded audio block: %u samples (%u bytes)",
-                opusConfig->samplesPerFrame,
-                m_FrameSize);
-
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "PipeWire device buffer: %u samples (%u ms)",
-                deviceSampleFrames,
-                m_DeviceBufferDurationMs);
-
-    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "SDL audio driver: %s",
-                SDL_GetCurrentAudioDriver());
-
-    // Start playback
-    if (!SDL_ResumeAudioStreamDevice(m_AudioStream)) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "Failed to start audio stream: %s", SDL_GetError());
-        return false;
-    }
-
-    return true;
+                "PLANK audio: native Kyber regulator, filtered FFmpeg compensation, target=15ms, driver=%s, device_buffer=%dms",
+                SDL_GetCurrentAudioDriver(), m_DeviceBufferDurationMs);
+    return SDL_ResumeAudioStreamDevice(m_AudioStream);
 }
 
 SdlAudioRenderer::~SdlAudioRenderer()
 {
-    if (m_AudioStream != nullptr) {
-        // Stop playback
+    // Session joins its producer before deleting us. Unregistering the callback
+    // takes SDL's stream lock and waits for any in-flight callback to return.
+    if (m_AudioStream) {
         SDL_PauseAudioStreamDevice(m_AudioStream);
+        SDL_SetAudioStreamGetCallback(m_AudioStream, nullptr, nullptr);
         SDL_DestroyAudioStream(m_AudioStream);
     }
-
-    if (m_AudioBuffer != nullptr) {
-        SDL_free(m_AudioBuffer);
-    }
-
-#if defined(HAVE_FFMPEG) && defined(Q_OS_LINUX)
-    swr_free(&m_SwrContext);
-#endif
-
-    SDL_QuitSubSystem(SDL_INIT_AUDIO);
-    SDL_assert(!SDL_WasInit(SDL_INIT_AUDIO));
+    plank_audio_free(m_Regulator);
+    plank_audio_swr_free(m_Filter);
+    if (m_Initialized) SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
-void* SdlAudioRenderer::getAudioBuffer(int*)
+void* SdlAudioRenderer::getAudioBuffer(int* size)
 {
-    return m_AudioBuffer;
+    if (size) *size = static_cast<int>(m_AudioBuffer.size() * sizeof(float));
+    return m_AudioBuffer.data();
+}
+
+void SDLCALL SdlAudioRenderer::pullAudio(void* opaque, SDL_AudioStream* stream,
+                                         int additionalBytes, int)
+{
+    auto& self = *static_cast<SdlAudioRenderer*>(opaque);
+    // SDL holds its recursive stream lock for the callback. Producer and
+    // telemetry use this SAME lock; no extra worker, queue or outer mutex.
+    std::array<float, 4096 * Channels> output{};
+    while (additionalBytes > 0 && !self.m_Failed) {
+        const int count = std::min(4096, additionalBytes / FrameBytes + (additionalBytes % FrameBytes != 0));
+        if (!plank_audio_pull(self.m_Regulator, reinterpret_cast<uint8_t*>(output.data()), count) ||
+                !SDL_PutAudioStreamData(stream, output.data(), count * FrameBytes)) {
+            self.m_Failed = true;
+            return;
+        }
+        additionalBytes -= count * FrameBytes;
+    }
 }
 
 bool SdlAudioRenderer::submitAudio(int bytesWritten)
 {
-    if (bytesWritten == 0) {
-        // Nothing to do
-        return true;
+    if (!m_AudioStream || SDL_GetAudioStreamDevice(m_AudioStream) == 0 ||
+            bytesWritten < 0 || bytesWritten % FrameBytes != 0 ||
+            static_cast<size_t>(bytesWritten) > m_AudioBuffer.size() * sizeof(float)) return false;
+    if (!SDL_LockAudioStream(m_AudioStream)) return false;
+    bool okay = !m_Failed;
+    if (okay && bytesWritten) {
+        okay = plank_audio_push(m_Regulator, reinterpret_cast<const uint8_t*>(m_AudioBuffer.data()),
+                                 bytesWritten / FrameBytes, 0);
+        if (!okay) m_Failed = true;
     }
-
-    const int inputFrames = m_BytesPerSampleFrame == 0 ?
-                                0 : bytesWritten / m_BytesPerSampleFrame;
-
-    const int pendingAudioMs = LiGetPendingAudioDuration();
-
-    // Generic Moonlight drops decoded audio to recover latency when its input
-    // queue grows. PLANK instead uses bounded resampling catch-up for
-    // ordinary scheduling bursts and retains a hard emergency ceiling.
-    constexpr int MaximumPlankPendingAudioMs = 100;
-    if ((!m_EnableAvSyncCorrection && pendingAudioMs > 30) ||
-            (m_EnableAvSyncCorrection &&
-             pendingAudioMs > MaximumPlankPendingAudioMs)) {
-        m_RawAudioFrames += inputFrames;
-        m_SkippedAudioBlocks++;
-        return true;
+    const Uint64 now = SDL_GetTicks();
+    PlankAudioStats stats{};
+    bool report = false;
+    int64_t filterDelay = 0;
+    int queuedBytes = 0;
+    if (okay && m_Telemetry && (!m_LastTelemetryTime || now - m_LastTelemetryTime >= 1000)) {
+        report = plank_audio_stats(m_Regulator, &stats);
+        filterDelay = plank_audio_swr_delay(m_Filter);
+        queuedBytes = SDL_GetAudioStreamQueued(m_AudioStream);
+        m_LastTelemetryTime = now;
     }
-
-    // Provide backpressure on the queue to ensure too many frames don't build up
-    // in SDL's audio queue, but don't wait forever to avoid a deadlock if the
-    // audio device fails.
-    for (int i = 0; i < 100; i++) {
-        // Our device may enter a permanent error status upon removal, so we need
-        // to recreate the audio device to pick up the new default audio device.
-        if (SDL_GetAudioStreamDevice(m_AudioStream) == 0) {
-            return false;
-        }
-
-        // Only queue more samples where there is 50 ms or less in SDL's queue
-        if (SDL_GetAudioStreamQueued(m_AudioStream) / m_FrameSize * m_FrameDurationMs <= 50) {
-            break;
-        }
-
-        SDL_Delay(1);
+    SDL_UnlockAudioStream(m_AudioStream);
+    // Logging can block on disk; never keep the device callback waiting for it.
+    if (report) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                "PLANK native audio regulator: ticks=%llu queued_frames=%u correction_ppm=%d input_frames=%llu pulled_frames=%llu underflow_frames=%llu skipped_frames=%llu filter_delay_frames=%lld sdl_queued_bytes=%d",
+                static_cast<unsigned long long>(now), stats.queued_frames, stats.correction_ppm,
+                static_cast<unsigned long long>(stats.input_frames),
+                static_cast<unsigned long long>(stats.pulled_frames),
+                static_cast<unsigned long long>(stats.underflow_frames),
+                static_cast<unsigned long long>(stats.skipped_frames),
+                static_cast<long long>(filterDelay), queuedBytes);
     }
-
-    const void* queuedBuffer = m_AudioBuffer;
-    int queuedBytes = bytesWritten;
-
-#if defined(HAVE_FFMPEG) && defined(Q_OS_LINUX)
-    if (m_EnableAvSyncCorrection && m_SwrContext != nullptr && inputFrames > 0) {
-        const Uint32 now = SDL_GetTicks();
-        const int backlogAudioMs = LiGetPendingAudioDuration();
-        const auto correction = m_AudioRateController.update(
-            m_RawAudioFrames,
-            m_SubmittedAudioFrames,
-            m_SampleRate,
-            now,
-            PlankAvSync::readVideoClock());
-        const auto backlogCorrection = m_AudioBacklogController.update(
-            backlogAudioMs,
-            now);
-        if (correction.updated || backlogCorrection.updated) {
-            // This is the numerical ratio interval, not buffered audio. At
-            // 48 kHz, one second rounds corrections in ~20.8 ppm steps;
-            // sixty seconds resolves sub-ppm corrections. Refreshing the
-            // ratio does not reset the filter or delay submitting this block.
-            constexpr int CompensationSeconds = 60;
-            const int compensationDistance = m_SampleRate * CompensationSeconds;
-            const int appliedCorrectionPpm =
-                correction.correctionPpm + backlogCorrection.correctionPpm;
-            const int sampleDelta = static_cast<int>(std::llround(
-                -static_cast<double>(appliedCorrectionPpm) *
-                compensationDistance / 1000000.0));
-            if (swr_set_compensation(m_SwrContext,
-                                     sampleDelta,
-                                     compensationDistance) < 0) {
-                SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                            "Unable to update PLANK audio correction");
-            }
-            else if (correction.updated &&
-                     (m_RawAudioFrames / m_SampleRate) % 10 == 0) {
-                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "PLANK A/V audio correction: ppm=%d catchup=%d applied=%d delta=%d distance=%d",
-                            correction.correctionPpm,
-                            backlogCorrection.correctionPpm,
-                            appliedCorrectionPpm,
-                            sampleDelta,
-                            compensationDistance);
-            }
-        }
-
-        const int outputCapacity = swr_get_out_samples(m_SwrContext, inputFrames);
-        m_CorrectedAudioBuffer.resize(
-            static_cast<std::size_t>(outputCapacity) * m_ChannelCount);
-        const uint8_t* inputPlanes[] = {
-            reinterpret_cast<const uint8_t*>(m_AudioBuffer)
-        };
-        uint8_t* outputPlanes[] = {
-            reinterpret_cast<uint8_t*>(m_CorrectedAudioBuffer.data())
-        };
-        const int outputFrames = swr_convert(m_SwrContext,
-                                             outputPlanes,
-                                             outputCapacity,
-                                             inputPlanes,
-                                             inputFrames);
-        if (outputFrames < 0) {
-            SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                         "PLANK audio correction failed");
-            return false;
-        }
-        queuedBuffer = m_CorrectedAudioBuffer.data();
-        queuedBytes = outputFrames * m_BytesPerSampleFrame;
-    }
-#endif
-
-    m_RawAudioFrames += inputFrames;
-    if (!SDL_PutAudioStreamData(m_AudioStream, queuedBuffer, queuedBytes)) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
-                     "Failed to queue audio sample: %s",
-                     SDL_GetError());
-    }
-    else if (m_EnableAvSyncCorrection) {
-        m_LastSubmittedAudioMediaTimeMs =
-            m_SubmittedAudioFrames * 1000 / m_SampleRate;
-        m_SubmittedAudioFrames += queuedBytes / m_BytesPerSampleFrame;
-    }
-
-    return true;
+    return okay;
 }
 
-int SdlAudioRenderer::getCapabilities()
+PlankAudioStats SdlAudioRenderer::readStats()
 {
-    // Direct submit can't be used because we use LiGetPendingAudioDuration()
-    return CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION;
+    PlankAudioStats stats{};
+    if (m_AudioStream && SDL_LockAudioStream(m_AudioStream)) {
+        plank_audio_stats(m_Regulator, &stats);
+        SDL_UnlockAudioStream(m_AudioStream);
+    }
+    return stats;
 }
-
+int SdlAudioRenderer::getCapabilities() { return CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION; }
 int SdlAudioRenderer::getQueuedAudioDurationMs()
 {
-    if (m_AudioStream == nullptr || m_BytesPerSecond == 0) {
-        return -1;
-    }
-
-    return static_cast<int>(SDL_GetAudioStreamQueued(m_AudioStream) * 1000ULL /
-                            m_BytesPerSecond);
+    if (!m_AudioStream || !SDL_LockAudioStream(m_AudioStream)) return -1;
+    PlankAudioStats stats{};
+    plank_audio_stats(m_Regulator, &stats);
+    const int sdlBytes = SDL_GetAudioStreamQueued(m_AudioStream);
+    const int duration = sdlBytes < 0 ? -1 :
+        static_cast<int>((uint64_t(stats.queued_frames) * FrameBytes + sdlBytes) * 1000 / (SampleRate * FrameBytes));
+    SDL_UnlockAudioStream(m_AudioStream);
+    return duration;
 }
-
-int SdlAudioRenderer::getDeviceBufferDurationMs()
-{
-    return m_DeviceBufferDurationMs;
-}
-
-qint64 SdlAudioRenderer::getSubmittedAudioMediaTimeMs()
-{
-    return m_LastSubmittedAudioMediaTimeMs;
-}
-
-int SdlAudioRenderer::getAudioClockCorrectionPpm()
-{
-    return m_AudioRateController.correctionPpm();
-}
-
-int SdlAudioRenderer::getAudioBacklogCorrectionPpm()
-{
-    return m_AudioBacklogController.correctionPpm();
-}
-
-quint64 SdlAudioRenderer::getSkippedAudioBlockCount()
-{
-    return m_SkippedAudioBlocks;
-}
-IAudioRenderer::AudioFormat SdlAudioRenderer::getAudioBufferFormat()
-{
-    return AudioFormat::Float32NE;
-}
+int SdlAudioRenderer::getDeviceBufferDurationMs() { return m_DeviceBufferDurationMs; }
+// Retained diagnostic field uses positive=compression; native stats above use
+// positive=expansion. This is a sign translation, not another controller.
+int SdlAudioRenderer::getAudioClockCorrectionPpm() { return -readStats().correction_ppm; }
+quint64 SdlAudioRenderer::getSkippedAudioBlockCount() { return (readStats().skipped_frames + 239) / 240; }
+IAudioRenderer::AudioFormat SdlAudioRenderer::getAudioBufferFormat() { return AudioFormat::Float32NE; }

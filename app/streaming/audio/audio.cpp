@@ -23,7 +23,7 @@ IAudioRenderer* Session::createAudioRenderer(const POPUS_MULTISTREAM_CONFIGURATI
     QString mlAudio = qgetenv("ML_AUDIO").toLower();
     if (mlAudio == "sdl") {
         TRY_INIT_RENDERER(SdlAudioRenderer, opusConfig,
-                          m_Computer->plankAuthentication)
+                          m_AvSyncTelemetryEnabled)
         return nullptr;
     }
 #if defined(HAVE_SLAUDIO)
@@ -48,7 +48,7 @@ IAudioRenderer* Session::createAudioRenderer(const POPUS_MULTISTREAM_CONFIGURATI
 
     // PLANK uses SDL as its sole audio renderer.
     TRY_INIT_RENDERER(SdlAudioRenderer, opusConfig,
-                      m_Computer->plankAuthentication)
+                      m_AvSyncTelemetryEnabled)
 
     return nullptr;
 }
@@ -251,18 +251,16 @@ void Session::arDecodeAndPlaySample(char* sampleData, int sampleLength, uint64_t
                     s_ActiveSession->m_ActiveAudioConfig.samplesPerFrame * 1000 /
                     s_ActiveSession->m_ActiveAudioConfig.sampleRate;
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                            "PLANK A/V audio clock: media=%llu submit=%llu queue=%d device=%d pending=%d frame=%d correction=%d skipped=%llu raw=%llu catchup=%d source_pts_us=%llu source_valid=%d",
+                            "PLANK A/V audio clock: media=%llu submit=%llu queue=%d device=%d frame=%d correction=%d skipped=%llu raw=%llu source_pts_us=%llu source_valid=%d",
                             static_cast<unsigned long long>(mediaTimeMs),
                             static_cast<unsigned long long>(now),
                             s_ActiveSession->m_AudioRenderer->getQueuedAudioDurationMs(),
                             s_ActiveSession->m_AudioRenderer->getDeviceBufferDurationMs(),
-                            LiGetPendingAudioDuration(),
                             frameDurationMs,
                             s_ActiveSession->m_AudioRenderer->getAudioClockCorrectionPpm(),
                             static_cast<unsigned long long>(
                                 s_ActiveSession->m_AudioRenderer->getSkippedAudioBlockCount()),
                             static_cast<unsigned long long>(uncorrectedMediaTimeMs),
-                            s_ActiveSession->m_AudioRenderer->getAudioBacklogCorrectionPpm(),
                             static_cast<unsigned long long>(sourcePtsUs == PLANK_AUDIO_PTS_UNKNOWN ? 0 : sourcePtsUs),
                             sourcePtsUs != PLANK_AUDIO_PTS_UNKNOWN);
                 s_ActiveSession->m_LastAudioTelemetryTime = now;

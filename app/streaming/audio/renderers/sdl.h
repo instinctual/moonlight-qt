@@ -1,62 +1,33 @@
 #pragma once
-
 #include "renderer.h"
-#include "streaming/avsynccontroller.h"
 #include <SDL3/SDL.h>
+#include <plank_audio.h>
 #include <vector>
-
-#if defined(HAVE_FFMPEG) && defined(Q_OS_LINUX)
-struct SwrContext;
-#endif
 
 class SdlAudioRenderer : public IAudioRenderer
 {
 public:
-    explicit SdlAudioRenderer(bool enableAvSyncCorrection = false);
-
-    virtual ~SdlAudioRenderer();
-
-    virtual bool prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* opusConfig);
-
-    virtual void* getAudioBuffer(int* size);
-
-    virtual bool submitAudio(int bytesWritten);
-
-    virtual int getCapabilities();
-
-    virtual int getQueuedAudioDurationMs() override;
-
-    virtual int getDeviceBufferDurationMs() override;
-
-    virtual qint64 getSubmittedAudioMediaTimeMs() override;
-
-    virtual int getAudioClockCorrectionPpm() override;
-
-    virtual int getAudioBacklogCorrectionPpm() override;
-
-    virtual quint64 getSkippedAudioBlockCount() override;
-    virtual AudioFormat getAudioBufferFormat();
-
+    explicit SdlAudioRenderer(bool telemetry = false);
+    ~SdlAudioRenderer() override;
+    bool prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION*) override;
+    void* getAudioBuffer(int* size) override;
+    bool submitAudio(int bytesWritten) override;
+    int getCapabilities() override;
+    int getQueuedAudioDurationMs() override;
+    int getDeviceBufferDurationMs() override;
+    int getAudioClockCorrectionPpm() override;
+    quint64 getSkippedAudioBlockCount() override;
+    AudioFormat getAudioBufferFormat() override;
 private:
-    SDL_AudioStream* m_AudioStream;
-    void* m_AudioBuffer;
-    int m_FrameSize;
-    int m_FrameDurationMs;
-    int m_BytesPerSampleFrame;
-    int m_BytesPerSecond;
-    int m_DeviceBufferDurationMs;
-    int m_SampleRate;
-    int m_ChannelCount;
-    bool m_EnableAvSyncCorrection;
-    quint64 m_RawAudioFrames;
-    quint64 m_SubmittedAudioFrames;
-    qint64 m_LastSubmittedAudioMediaTimeMs;
-    quint64 m_SkippedAudioBlocks;
-    PlankAvSync::AudioRateController m_AudioRateController;
-    PlankAvSync::AudioBacklogController m_AudioBacklogController;
-
-#if defined(HAVE_FFMPEG) && defined(Q_OS_LINUX)
-    SwrContext* m_SwrContext;
-    std::vector<float> m_CorrectedAudioBuffer;
-#endif
+    static void SDLCALL pullAudio(void*, SDL_AudioStream*, int additionalBytes, int totalBytes);
+    PlankAudioStats readStats();
+    SDL_AudioStream* m_AudioStream = nullptr;
+    PlankAudioRegulator* m_Regulator = nullptr;
+    void* m_Filter = nullptr;
+    std::vector<float> m_AudioBuffer;
+    int m_DeviceBufferDurationMs = 0;
+    bool m_Initialized = false;
+    bool m_Failed = false; // SDL stream lock once callbacks start.
+    bool m_Telemetry = false;
+    Uint64 m_LastTelemetryTime = 0;
 };

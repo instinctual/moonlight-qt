@@ -71,6 +71,20 @@ unix:!macx:contains(CONFIG, plank-transport) {
     INCLUDEPATH += $$PLANK_TRANSPORT_DIR/include
     LIBS += $$PLANK_TRANSPORT_LIBRARY -ldl -lpthread -lm -lrt
     DEFINES += PLANK_TRANSPORT=1
+
+    PLANK_AUDIO_DIR = $$PLANK2_ROOT/core/audio
+    PLANK_AUDIO_TARGET = $$OUT_PWD/plank-audio-cargo
+    PLANK_AUDIO_LIBRARY = $$PLANK_AUDIO_TARGET/release/libplank_audio.a
+    plank_audio.target = $$PLANK_AUDIO_LIBRARY
+    plank_audio.depends = FORCE
+    plank_audio.commands = CARGO_TARGET_DIR=$$shell_quote($$PLANK_AUDIO_TARGET) \
+        $$shell_quote($$PLANK_CARGO) build --release --locked --offline \
+        --manifest-path $$shell_quote($$PLANK_AUDIO_DIR/Cargo.toml)
+    QMAKE_EXTRA_TARGETS += plank_audio
+    PRE_TARGETDEPS += $$PLANK_AUDIO_LIBRARY
+    INCLUDEPATH += $$PLANK_AUDIO_DIR/include
+    LIBS += $$PLANK_AUDIO_LIBRARY
+    SOURCES += $$PLANK_AUDIO_DIR/src/filtered_resampler.c
 }
 
 TARGET = plank-client
