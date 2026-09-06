@@ -44,6 +44,11 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
     if (!m_Regulator) return false;
     m_AudioBuffer.resize(config->samplesPerFrame * Channels);
     const SDL_AudioSpec want{SDL_AUDIO_F32, Channels, SampleRate};
+    // A callback must be smaller than the native 15 ms regulator target.
+    // SDL's throughput-oriented 1024-frame default is 21 ms at 48 kHz.
+    // Request 256 frames (~5 ms); verify the actual device below because SDL
+    // backends may round or ignore the hint. This is not an extra PCM queue.
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "256");
     m_AudioStream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
                                               &want, pullAudio, this);
     if (!m_AudioStream) {
@@ -54,6 +59,12 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
     int frames = 0;
     if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(m_AudioStream), &deviceSpec, &frames) ||
             deviceSpec.freq <= 0) return false;
+    if (frames <= 0 || uint64_t(frames) * 1000 >= uint64_t(deviceSpec.freq) * 15) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
+                     "Audio device callback (%d frames at %d Hz) exceeds native 15 ms buffering target",
+                     frames, deviceSpec.freq);
+        return false;
+    }
     m_DeviceBufferDurationMs = frames * 1000 / deviceSpec.freq;
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "PLANK audio: native Kyber regulator, filtered FFmpeg compensation, target=15ms, driver=%s, device_buffer=%dms",
